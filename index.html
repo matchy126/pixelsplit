@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PIXEL SPLIT — BPM Live Tool</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@700;800&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#08080a;--surface:#0f0f13;--surface2:#16161c;
+  --border:#242430;--accent:#e8ff47;--accent2:#ff4060;--text:#dddde8;--muted:#52526a;--track:#191920;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;font-size:13px;overflow:hidden}
+.app{display:grid;grid-template-columns:270px 1fr;height:100vh}
+
+.sidebar{
+  background:var(--surface);border-right:1px solid var(--border);
+  padding:14px;display:flex;flex-direction:column;gap:13px;overflow-y:auto;z-index:20;
+}
+.logo{font-family:'Syne',sans-serif;font-weight:800;font-size:13px;letter-spacing:.1em;color:var(--accent);margin-bottom:2px}
+.build-date{font-size:10px;color:var(--muted);letter-spacing:.08em}
+.slabel{font-size:10px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase;margin-bottom:5px}
+
+.drop-zone{
+  border:1.5px dashed var(--border);border-radius:4px;padding:14px 10px;
+  text-align:center;cursor:pointer;transition:border-color .2s,background .2s;position:relative
+}
+.drop-zone:hover,.drop-zone.drag{border-color:var(--accent);background:rgba(232,255,71,.04)}
+.drop-zone input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.drop-zone .dicon{font-size:18px;opacity:.3;margin-bottom:4px}
+.drop-zone .dhint{color:var(--muted);font-size:11px;line-height:1.6}
+
+.bg-thumb-wrap{
+  position:relative;border:1px solid var(--border);border-radius:3px;overflow:hidden;
+  height:56px;background:var(--track);display:flex;align-items:center;justify-content:center
+}
+.bg-thumb-wrap img{width:100%;height:100%;object-fit:cover}
+.no-bg{font-size:10px;color:var(--muted)}
+.bg-clear{position:absolute;top:3px;right:3px;background:rgba(8,8,10,.8);border:1px solid var(--border);color:var(--muted);border-radius:2px;padding:1px 5px;font-size:10px;cursor:pointer}
+.bg-clear:hover{color:var(--accent)}
+
+.img-list{max-height:90px;overflow-y:auto;display:flex;flex-direction:column;gap:3px}
+.img-item{display:flex;align-items:center;gap:7px;padding:4px 7px;background:var(--surface2);border-radius:3px;border:1px solid var(--border);font-size:11px}
+.img-item .thumb{width:22px;height:22px;object-fit:cover;border-radius:2px;flex-shrink:0}
+.img-item .fname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.img-item .rm{background:none;border:none;color:var(--muted);cursor:pointer;font-size:11px;padding:0 2px}
+.img-item .rm:hover{color:var(--accent)}
+
+.prow{display:flex;flex-direction:column;gap:5px}
+.phdr{display:flex;justify-content:space-between;align-items:center}
+.pname{font-size:12px}
+.pval{color:var(--accent);font-size:12px;min-width:44px;text-align:right}
+
+.num-input{
+  background:var(--surface2);border:1px solid var(--border);color:var(--text);
+  padding:7px 8px;font-family:'DM Mono',monospace;font-size:14px;font-weight:500;
+  border-radius:3px;outline:none;width:100%;text-align:center;letter-spacing:.04em
+}
+.num-input:focus{border-color:var(--accent)}
+
+.sel{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px 8px;font-family:'DM Mono',monospace;font-size:12px;border-radius:3px;outline:none;width:100%}
+
+.mode-toggle{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--border);border-radius:3px;overflow:hidden}
+.mode-btn{padding:9px;background:none;border:none;color:var(--muted);cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;letter-spacing:.06em;transition:background .15s,color .15s}
+.mode-btn:first-child{border-right:1px solid var(--border)}
+.mode-btn.active{background:var(--accent);color:#08080a;font-weight:500}
+.mode-btn.live-active{background:var(--accent2);color:#fff;font-weight:500}
+
+.btn{padding:9px 12px;border:none;border-radius:3px;font-family:'DM Mono',monospace;font-size:12px;letter-spacing:.07em;cursor:pointer;transition:opacity .15s,transform .1s}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:var(--accent);color:#08080a;font-weight:500;width:100%}
+.btn-danger{background:var(--accent2);color:#fff;font-weight:500;width:100%}
+.btn-secondary{background:var(--surface2);color:var(--text);border:1px solid var(--border);width:100%}
+.btn:disabled{opacity:.3;cursor:not-allowed}
+
+.divider{height:1px;background:var(--border);margin:2px 0}
+
+.preview-area{position:relative;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.preview-area canvas{max-width:100%;max-height:100%;display:block}
+.preview-area:fullscreen{background:#000}
+.preview-area:fullscreen canvas{width:100vw!important;height:100vh!important;max-width:none;max-height:none;object-fit:contain}
+
+.empty-state{position:absolute;text-align:center;color:var(--muted);pointer-events:none}
+.empty-state .big{font-size:40px;opacity:.1}
+.empty-state p{margin-top:10px;font-size:11px;line-height:1.9}
+
+.hud{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;align-items:flex-end;gap:6px;pointer-events:none;z-index:5}
+.hud-pill{background:rgba(8,8,10,.75);border:1px solid var(--border);border-radius:3px;padding:4px 8px;font-size:11px;letter-spacing:.08em;backdrop-filter:blur(4px)}
+.hud-pill.live{border-color:var(--accent2);color:var(--accent2)}
+.hud-pill.beat{border-color:var(--accent);color:var(--accent);font-size:12px;font-weight:500}
+
+.preview-controls{position:absolute;bottom:12px;right:12px;display:flex;gap:6px;z-index:5}
+.icon-btn{width:32px;height:32px;border:1px solid rgba(255,255,255,.15);background:rgba(8,8,10,.7);color:var(--text);border-radius:3px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:13px;backdrop-filter:blur(4px);transition:border-color .15s,color .15s}
+.icon-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+.prog-overlay{position:fixed;inset:0;background:rgba(8,8,10,.92);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:200}
+.prog-overlay.show{display:flex}
+.prog-box{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:28px 44px;text-align:center;min-width:300px}
+.prog-title{font-family:'Syne',sans-serif;font-size:15px;font-weight:700;color:var(--accent);margin-bottom:12px;letter-spacing:.06em}
+.prog-bar-wrap{background:var(--track);height:4px;border-radius:2px;overflow:hidden;margin:12px 0}
+.prog-bar-fill{height:100%;background:var(--accent);width:0%}
+.prog-label{color:var(--muted);font-size:11px;line-height:1.8}
+
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.pulsing{animation:pulse .6s ease-in-out infinite}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+</style>
+</head>
+<body>
+<div class="app">
+<aside class="sidebar" id="sidebar">
+  <div>
+    <div class="logo">PIXEL SPLIT</div>
+    <div class="build-date">BPM LIVE TOOL</div>
+  </div>
+  <div class="divider"></div>
+
+  <!-- BG -->
+  <div>
+    <div class="slabel">背景画像</div>
+    <div class="bg-thumb-wrap" id="bgThumbWrap"><span class="no-bg">なし</span></div>
+    <div class="drop-zone" id="bgDropZone" style="margin-top:6px;padding:9px">
+      <input type="file" id="bgFileInput" accept="image/*">
+      <div class="dhint">背景画像を設定</div>
+    </div>
+  </div>
+  <div class="divider"></div>
+
+  <!-- Clip images -->
+  <div>
+    <div class="slabel">クリップ画像 (<span id="imgCount">0</span>)</div>
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept="image/*" multiple webkitdirectory>
+      <div class="dicon">⬡</div>
+      <div class="dhint">フォルダ / 複数ファイル</div>
+    </div>
+    <div class="img-list" id="imgList" style="margin-top:6px"></div>
+  </div>
+  <div class="divider"></div>
+
+  <!-- BPM -->
+  <div>
+    <div class="slabel">BPM</div>
+    <input type="number" class="num-input" id="bpmInput" value="128" min="20" max="300">
+  </div>
+
+  <!-- Resolution -->
+  <div class="prow">
+    <div class="phdr"><span class="pname">解像度</span></div>
+    <select id="resSel" class="sel">
+      <option value="1920x1080">1920×1080</option>
+      <option value="1280x720">1280×720</option>
+      <option value="1080x1080">1080×1080</option>
+      <option value="1080x1920">1080×1920 (縦)</option>
+    </select>
+  </div>
+
+  <!-- Bars -->
+  <div class="prow">
+    <div class="phdr"><span class="pname">小節数</span><span class="pval" id="barsVal">4小節</span></div>
+    <input type="range" id="barsRange" min="1" max="64" value="4"
+      oninput="document.getElementById('barsVal').textContent=this.value+'小節'">
+  </div>
+
+  <!-- Time sig -->
+  <div class="prow">
+    <div class="phdr"><span class="pname">拍子</span></div>
+    <select id="timeSig" class="sel">
+      <option value="4">4/4</option>
+      <option value="3">3/4</option>
+      <option value="2">2/4</option>
+      <option value="8">8/8</option>
+    </select>
+  </div>
+
+  <!-- Seed -->
+  <div class="prow">
+    <div class="phdr"><span class="pname">シード</span><span class="pval" id="seedDisp">—</span></div>
+    <input type="number" class="num-input" id="seedInput" placeholder="auto" style="font-size:11px;padding:5px">
+  </div>
+  <div class="divider"></div>
+
+  <!-- Center Text -->
+  <div>
+    <div class="slabel">中央テキスト</div>
+    <input type="text" class="num-input" id="centerTextInput" placeholder="テキストを入力" style="text-align:left;font-size:13px;margin-bottom:6px">
+    <div class="prow" style="margin-bottom:6px">
+      <select id="centerFont" class="sel">
+        <option value="'Syne',sans-serif" selected>Syne (Bold)</option>
+        <option value="'DM Mono',monospace">DM Mono</option>
+        <option value="'Arial Black',sans-serif">Arial Black</option>
+        <option value="'Georgia',serif">Georgia</option>
+        <option value="'Impact',sans-serif">Impact</option>
+      </select>
+    </div>
+    <div class="prow" style="margin-bottom:6px">
+      <div class="phdr"><span class="pname">サイズ</span><span class="pval" id="centerSizeVal">10%</span></div>
+      <input type="range" id="centerSize" min="2" max="40" value="10"
+        oninput="document.getElementById('centerSizeVal').textContent=this.value+'%'; if(sequence.length)renderFrame(pauseTime||0);">
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:6px">
+      <input type="color" id="centerColor" value="#e8ff47" style="flex:1;height:30px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;cursor:pointer">
+      <select id="centerAlign" class="sel" style="flex:1">
+        <option value="center" selected>中央</option>
+        <option value="top">上</option>
+        <option value="bottom">下</option>
+      </select>
+    </div>
+    <div class="prow" style="margin-bottom:6px">
+      <div class="phdr"><span class="pname">縁取り</span><span class="pval" id="centerStrokeVal">2px</span></div>
+      <input type="range" id="centerStroke" min="0" max="12" value="2"
+        oninput="document.getElementById('centerStrokeVal').textContent=this.value+'px'; if(sequence.length)renderFrame(pauseTime||0);">
+    </div>
+    <div class="mode-toggle" style="grid-template-columns:1fr 1fr 1fr">
+      <button class="mode-btn active" id="centerFxNone" onclick="setCenterFx('none')" style="font-size:9px">なし</button>
+      <button class="mode-btn" id="centerFxPulse" onclick="setCenterFx('pulse')" style="font-size:9px">拍動</button>
+      <button class="mode-btn" id="centerFxGlitch" onclick="setCenterFx('glitch')" style="font-size:9px">グリッチ</button>
+    </div>
+  </div>
+  <div class="divider"></div>
+
+  <!-- Mode -->
+  <div>
+    <div class="slabel">モード</div>
+    <div class="mode-toggle">
+      <button class="mode-btn active" id="modeManual" onclick="setMode('manual')">◈ 通常</button>
+      <button class="mode-btn" id="modeLive" onclick="setMode('live')">⬡ LIVE</button>
+    </div>
+  </div>
+
+  <div id="manualControls">
+    <button class="btn btn-primary" id="genBtn" onclick="generateSeq()" disabled style="margin-bottom:6px">◈ シーケンス生成</button>
+    <div style="display:flex;gap:6px">
+      <button class="btn btn-secondary" id="playBtn" onclick="togglePlay()" disabled style="flex:1">▶ 再生</button>
+      <button class="btn btn-secondary" onclick="resetPlay()" style="flex:1">◀◀</button>
+    </div>
+    <div style="margin-top:8px">
+      <select id="exportFps" class="sel" style="margin-bottom:6px">
+        <option value="30" selected>30 fps</option>
+        <option value="60">60 fps</option>
+      </select>
+      <button class="btn btn-secondary" id="exportBtn" onclick="startExport()" disabled>↓ WebM 書き出し</button>
+    </div>
+  </div>
+
+  <div id="liveControls" style="display:none">
+    <div class="prow" style="margin-bottom:8px">
+      <div class="phdr"><span class="pname">更新間隔</span><span class="pval" id="refreshVal">1拍</span></div>
+      <input type="range" id="refreshRate" min="1" max="8" value="1"
+        oninput="document.getElementById('refreshVal').textContent=this.value+'拍'">
+    </div>
+    <button class="btn btn-danger" id="liveStartBtn" onclick="toggleLive()" disabled>⬡ LIVE START</button>
+  </div>
+</aside>
+
+<main class="preview-area" id="previewArea">
+  <div class="empty-state" id="emptyState">
+    <div class="big">▦</div>
+    <p>画像を読み込み<br>シーケンスを生成してください</p>
+  </div>
+  <canvas id="previewCanvas"></canvas>
+  <div class="hud" id="hud" style="display:none">
+    <div class="hud-pill beat" id="hudBeat">—</div>
+    <div class="hud-pill live pulsing" id="hudLive" style="display:none">● LIVE</div>
+  </div>
+  <div class="preview-controls">
+    <button class="icon-btn" title="全画面" onclick="toggleFullscreen()">⛶</button>
+  </div>
+</main>
+</div>
+
+<div class="prog-overlay" id="progOverlay">
+  <div class="prog-box">
+    <div class="prog-title">RENDERING</div>
+    <div class="prog-label" id="progLabel">初期化中...</div>
+    <div class="prog-bar-wrap"><div class="prog-bar-fill" id="progFill"></div></div>
+    <div class="prog-label" id="progFrame"></div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════
+// RNG (seeded)
+// ══════════════════════════════════════════════════════
+let _rng = 0;
+function seedRng(s){ _rng = s>>>0; }
+function rng(){
+  _rng|=0; _rng=_rng+0x6D2B79F5|0;
+  let t=Math.imul(_rng^_rng>>>15,1|_rng);
+  t=t+Math.imul(t^t>>>7,61|t)^t;
+  return ((t^t>>>14)>>>0)/4294967296;
+}
+function rngInt(a,b){return Math.floor(rng()*(b-a+1))+a;}
+function rngPick(arr){return arr[Math.floor(rng()*arr.length)];}
+
+// ══════════════════════════════════════════════════════
+// State
+// ══════════════════════════════════════════════════════
+let images   = [];
+let bgImage  = null;
+let sequence = [];
+let totalDur = 0;
+let mode     = 'manual';
+
+// Manual playback — uses absolute timestamps, never accumulated dt
+let isPlaying   = false;
+let playOrigin  = 0;   // performance.now() when play started
+let pauseTime   = 0;   // seconds elapsed when paused
+let rafId       = null;
+
+// Layer accumulation
+let layerCvs = null, layerCtx = null;
+let committed = 0;
+
+// Live mode
+let liveActive  = false;
+let liveOrigin  = 0;   // performance.now() when live started
+let liveLayerCvs= null, liveLayerCtx = null;
+let liveClips   = [];
+let livePrevBeat= -1;
+let liveRafId   = null;
+
+const canvas = document.getElementById('previewCanvas');
+const ctx    = canvas.getContext('2d');
+
+// ══════════════════════════════════════════════════════
+// Background
+// ══════════════════════════════════════════════════════
+function setupBgDrop(inputId, dropId){
+  const input = document.getElementById(inputId);
+  const drop  = document.getElementById(dropId);
+  input.addEventListener('change', e=>{ if(e.target.files[0]) applyBg(URL.createObjectURL(e.target.files[0])); });
+  drop.addEventListener('dragover',  e=>{ e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', ()=>drop.classList.remove('drag'));
+  drop.addEventListener('drop', e=>{
+    e.preventDefault(); drop.classList.remove('drag');
+    const f=e.dataTransfer.files[0];
+    if(f&&f.type.startsWith('image/')) applyBg(URL.createObjectURL(f));
+  });
+}
+function applyBg(url){
+  const img=new Image();
+  img.onload=()=>{
+    bgImage=img;
+    const w=document.getElementById('bgThumbWrap');
+    w.innerHTML=`<img src="${url}"><button class="bg-clear" onclick="clearBg()">✕</button>`;
+  };
+  img.src=url;
+}
+function clearBg(){
+  bgImage=null;
+  document.getElementById('bgThumbWrap').innerHTML='<span class="no-bg">なし</span>';
+}
+setupBgDrop('bgFileInput','bgDropZone');
+
+['centerTextInput','centerFont','centerColor','centerAlign'].forEach(id=>{
+  document.getElementById(id).addEventListener('input', ()=>{ if(sequence.length) renderFrame(pauseTime||0); });
+});
+
+// ══════════════════════════════════════════════════════
+// Clip images
+// ══════════════════════════════════════════════════════
+document.getElementById('fileInput').addEventListener('change', e=>loadFiles(Array.from(e.target.files)));
+const dz=document.getElementById('dropZone');
+dz.addEventListener('dragover',  e=>{ e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', ()=>dz.classList.remove('drag'));
+dz.addEventListener('drop', e=>{
+  e.preventDefault(); dz.classList.remove('drag');
+  loadFiles(Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/')));
+});
+
+async function loadFiles(files){
+  files=files.filter(f=>f.type.startsWith('image/'));
+  if(!files.length) return;
+  for(const f of files){
+    await new Promise(res=>{
+      const img=new Image(), url=URL.createObjectURL(f);
+      img.onload=()=>{ images.push({name:f.name,img,url}); res(); };
+      img.onerror=res; img.src=url;
+    });
+  }
+  updateImgList(); checkReady();
+}
+function updateImgList(){
+  document.getElementById('imgCount').textContent=images.length;
+  const list=document.getElementById('imgList');
+  list.innerHTML='';
+  images.forEach((item,i)=>{
+    const d=document.createElement('div'); d.className='img-item';
+    d.innerHTML=`<img class="thumb" src="${item.url}"><span class="fname">${item.name}</span><button class="rm" onclick="removeImg(${i})">✕</button>`;
+    list.appendChild(d);
+  });
+}
+function removeImg(i){ URL.revokeObjectURL(images[i].url); images.splice(i,1); updateImgList(); checkReady(); }
+function checkReady(){
+  const ok=images.length>0;
+  document.getElementById('genBtn').disabled=!ok;
+  document.getElementById('liveStartBtn').disabled=!ok;
+}
+
+// ══════════════════════════════════════════════════════
+// Helpers
+// ══════════════════════════════════════════════════════
+function getOutputSize(){ return document.getElementById('resSel').value.split('x').map(Number); }
+function getBpm(){ return parseFloat(document.getElementById('bpmInput').value)||128; }
+function getBeats(){ return parseInt(document.getElementById('timeSig').value); }
+
+function drawBackground(c,W,H){
+  if(bgImage){
+    const r=Math.max(W/bgImage.width,H/bgImage.height);
+    const bw=bgImage.width*r, bh=bgImage.height*r;
+    c.drawImage(bgImage,(W-bw)/2,(H-bh)/2,bw,bh);
+  }else{
+    c.fillStyle='#08080a'; c.fillRect(0,0,W,H);
+  }
+}
+
+function updateHudBeat(t){
+  const beatDur=60/getBpm();
+  const bi=Math.floor(t/beatDur);
+  const bar=Math.floor(bi/getBeats())+1;
+  const beat=(bi%getBeats())+1;
+  document.getElementById('hudBeat').textContent=`${bar}:${beat}`;
+}
+
+// ══════════════════════════════════════════════════════
+// Center text overlay
+// ══════════════════════════════════════════════════════
+let centerFx='none';
+function setCenterFx(fx){
+  centerFx=fx;
+  ['centerFxNone','centerFxPulse','centerFxGlitch'].forEach(id=>{
+    document.getElementById(id).className='mode-btn';
+  });
+  document.getElementById('centerFx'+fx.charAt(0).toUpperCase()+fx.slice(1)).className='mode-btn active';
+  if(sequence.length) renderFrame(pauseTime||0);
+}
+
+function drawCenterText(c,W,H,t){
+  const text=document.getElementById('centerTextInput').value;
+  if(!text) return;
+
+  const sizePct  = parseInt(document.getElementById('centerSize').value);
+  const fontFam  = document.getElementById('centerFont').value;
+  const color    = document.getElementById('centerColor').value;
+  const align    = document.getElementById('centerAlign').value;
+  const strokeW  = parseInt(document.getElementById('centerStroke').value);
+
+  let fontSize = Math.round(Math.min(W,H)*sizePct/100);
+  let cx=W/2, cy=H/2;
+  let alpha=1, ox=0, oy=0, glitchOffset=0;
+
+  const beatDur=60/getBpm();
+  const beatPhase = (t%beatDur)/beatDur; // 0..1 within current beat
+
+  if(centerFx==='pulse'){
+    // scale pulses 1.0 -> 1.18 -> 1.0 on each beat
+    const s=1+0.18*Math.sin(Math.PI*Math.min(1,beatPhase*2));
+    fontSize=Math.round(fontSize*(beatPhase<0.5?s:1));
+  } else if(centerFx==='glitch'){
+    // brief jitter right after each beat
+    if(beatPhase<0.12){
+      glitchOffset=(rngLikeJitter(t)-0.5)*fontSize*0.25;
+      ox=glitchOffset;
+    }
+  }
+
+  if(align==='top') cy=fontSize*0.9;
+  else if(align==='bottom') cy=H-fontSize*0.6;
+
+  c.save();
+  c.font=`800 ${fontSize}px ${fontFam}`;
+  c.textAlign='center';
+  c.textBaseline='middle';
+  c.lineJoin='round';
+
+  if(centerFx==='glitch' && glitchOffset!==0){
+    // RGB-split style glitch
+    c.globalAlpha=0.6;
+    c.fillStyle='#ff4060';
+    c.fillText(text, cx+ox-2, cy+oy);
+    c.fillStyle='#47e8ff';
+    c.fillText(text, cx+ox+2, cy+oy);
+    c.globalAlpha=1;
+  }
+
+  if(strokeW>0){
+    c.strokeStyle='#08080a';
+    c.lineWidth=strokeW;
+    c.strokeText(text, cx+ox, cy+oy);
+  }
+  c.fillStyle=color;
+  c.fillText(text, cx+ox, cy+oy);
+  c.restore();
+}
+// simple deterministic pseudo-jitter based on time, so glitch is stable per-frame (no RNG stream pollution)
+function rngLikeJitter(t){
+  const x=Math.sin(t*999.123)*43758.5453;
+  return x-Math.floor(x);
+}
+
+// ══════════════════════════════════════════════════════
+// Clip factory
+// ══════════════════════════════════════════════════════
+function makeClip(startTime, pool, outW, outH){
+  const imgItem    = rngPick(pool);
+  const img        = imgItem.img;
+  const direction  = rng()<.5?'v':'h';
+  const movingSide = rng()<.5?0:1;
+  const posR       = rng();
+  const splitPos   = posR<.33?1:posR<.66?rngInt(40,60):99;
+
+  // Size: 15%~75% of output short side
+  const shortSide   = Math.min(outW,outH);
+  const scaleFactor = 0.15 + rng()*0.60;
+  const aspect      = img.width/img.height;
+  let drawW,drawH;
+  if(aspect>=1){ drawW=Math.round(shortSide*scaleFactor); drawH=Math.round(drawW/aspect); }
+  else          { drawH=Math.round(shortSide*scaleFactor); drawW=Math.round(drawH*aspect); }
+
+  // maxGap proportional to draw size: 30%~120% of relevant dimension
+  const drawDim = direction==='v' ? drawW : drawH;
+  const maxGap  = Math.round(drawDim * (0.30 + rng()*0.90));
+
+  // Center can be anywhere on canvas
+  const cx=rngInt(0,outW), cy=rngInt(0,outH);
+  const dx=cx-Math.floor(drawW/2);
+  const dy=cy-Math.floor(drawH/2);
+
+  return {startTime,duration:0.3,imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx,dy};
+}
+
+// ══════════════════════════════════════════════════════
+// Clip renderer
+//
+// Strategy: always draw everything INSIDE the tmp canvas
+// by adding a positive offset equal to gap (for the side
+// that moves in the negative direction). Then compensate
+// when placing tmp on destCtx.
+//
+// Vertical split:
+//   movingSide=0 (left moves left):
+//     - tmp is (drawW + gap) wide
+//     - draw left at x=0 (natural), right at x=splitX+gap
+//     - 1px stretch fills splitX → splitX+gap
+//     - place tmp at destCtx x = dx-gap  (shifts content left by gap)
+//   movingSide=1 (right moves right):
+//     - tmp is (drawW + gap) wide
+//     - draw left at x=0, right at x=splitX+gap
+//     - 1px stretch fills splitX → splitX+gap
+//     - place tmp at destCtx x = dx  (right side extends beyond drawW, fine)
+//
+// Horizontal: same logic on Y axis.
+// ══════════════════════════════════════════════════════
+function renderClip(destCtx, clip, t){
+  const {imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx,dy}=clip;
+  const img=imgItem.img;
+  const gap=Math.round(t*maxGap);
+
+  const srcW=img.width, srcH=img.height;
+  const spx=splitPos/100;
+
+  if(direction==='v'){
+    const splitX = Math.round(drawW*spx);
+    const lSrcW  = Math.round(srcW*spx);
+    const rSrcW  = srcW-lSrcW;
+    const rDstW  = drawW-splitX;
+
+    // tmp is always wide enough for both halves + the gap
+    const tmp=document.createElement('canvas');
+    tmp.width=drawW+gap; tmp.height=drawH;
+    const tc=tmp.getContext('2d');
+
+    if(movingSide===0){
+      // LEFT moves left → we shift entire content RIGHT by gap inside tmp,
+      // then place tmp at dx-gap so net effect is left side moves left.
+      // Inside tmp:  left at x=gap-gap=0..splitX, right at x=splitX+gap
+      // Wait — simpler: draw left at x=0, right at splitX+gap, stretch between.
+      // Place tmp at destCtx (dx - gap, dy).
+      tc.drawImage(img, 0,    0,lSrcW,srcH,  0,          0, splitX,  drawH); // left block at 0
+      tc.drawImage(img, lSrcW,0,rSrcW,srcH,  splitX+gap, 0, rDstW,   drawH); // right block shifted right
+      if(gap>0){
+        const sx=Math.min(srcW-1,lSrcW); // rightmost col of left half
+        tc.drawImage(img, sx,0,1,srcH,   splitX,     0, gap,     drawH); // stretch fills gap
+      }
+      destCtx.drawImage(tmp, dx-gap, dy);
+    } else {
+      // RIGHT moves right → left stays, right + stretch extend to the right.
+      // Place tmp at dx (extra width on right side is fine).
+      tc.drawImage(img, 0,    0,lSrcW,srcH,  0,          0, splitX,  drawH); // left fixed
+      tc.drawImage(img, lSrcW,0,rSrcW,srcH,  splitX+gap, 0, rDstW,   drawH); // right shifted right
+      if(gap>0){
+        const sx=Math.min(srcW-1,lSrcW);
+        tc.drawImage(img, sx,0,1,srcH,       splitX,     0, gap,     drawH); // stretch
+      }
+      destCtx.drawImage(tmp, dx, dy);
+    }
+  } else {
+    // Horizontal split
+    const splitY = Math.round(drawH*spx);
+    const tSrcH  = Math.round(srcH*spx);
+    const bSrcH  = srcH-tSrcH;
+    const bDstH  = drawH-splitY;
+
+    const tmp=document.createElement('canvas');
+    tmp.width=drawW; tmp.height=drawH+gap;
+    const tc=tmp.getContext('2d');
+
+    if(movingSide===0){
+      // TOP moves up → draw top at y=0, bottom at splitY+gap, stretch between.
+      // Place tmp at (dx, dy-gap).
+      tc.drawImage(img, 0,0,    srcW,tSrcH,  0, 0,          drawW, splitY); // top at 0
+      tc.drawImage(img, 0,tSrcH,srcW,bSrcH,  0, splitY+gap, drawW, bDstH); // bottom shifted down
+      if(gap>0){
+        const sy=Math.min(srcH-1,tSrcH);
+        tc.drawImage(img, 0,sy,srcW,1,        0, splitY,     drawW, gap);   // stretch
+      }
+      destCtx.drawImage(tmp, dx, dy-gap);
+    } else {
+      // BOTTOM moves down → top stays, bottom + stretch extend downward.
+      // Place tmp at (dx, dy).
+      tc.drawImage(img, 0,0,    srcW,tSrcH,  0, 0,          drawW, splitY); // top fixed
+      tc.drawImage(img, 0,tSrcH,srcW,bSrcH,  0, splitY+gap, drawW, bDstH); // bottom shifted
+      if(gap>0){
+        const sy=Math.min(srcH-1,tSrcH);
+        tc.drawImage(img, 0,sy,srcW,1,        0, splitY,     drawW, gap);   // stretch
+      }
+      destCtx.drawImage(tmp, dx, dy);
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// Layer management
+// ══════════════════════════════════════════════════════
+function initLayer(W,H){
+  layerCvs=document.createElement('canvas');
+  layerCvs.width=W; layerCvs.height=H;
+  layerCtx=layerCvs.getContext('2d');
+  committed=0;
+}
+function buildLayerUpTo(idx){
+  for(let i=committed;i<idx;i++) renderClip(layerCtx,sequence[i],1);
+  committed=Math.max(committed,idx);
+}
+
+// ══════════════════════════════════════════════════════
+// Frame render
+// ══════════════════════════════════════════════════════
+function renderFrame(t){
+  if(!sequence.length) return;
+  const W=canvas.width, H=canvas.height;
+
+  let firstActive=0;
+  while(firstActive<sequence.length &&
+        sequence[firstActive].startTime+sequence[firstActive].duration < t) firstActive++;
+  buildLayerUpTo(firstActive);
+
+  ctx.clearRect(0,0,W,H);
+  drawBackground(ctx,W,H);
+  ctx.drawImage(layerCvs,0,0);
+
+  for(let i=firstActive;i<sequence.length;i++){
+    const clip=sequence[i];
+    if(clip.startTime>t) break;
+    renderClip(ctx,clip,Math.min(1,(t-clip.startTime)/clip.duration));
+  }
+  drawCenterText(ctx,W,H,t);
+  updateHudBeat(t);
+}
+
+// ══════════════════════════════════════════════════════
+// Sequence generation (manual mode)
+// ══════════════════════════════════════════════════════
+function generateSeq(){
+  if(!images.length) return;
+  const bpm=getBpm(), bars=parseInt(document.getElementById('barsRange').value);
+  const beats=getBeats(), beatDur=60/bpm;
+  const totalBts=bars*beats;
+  totalDur=totalBts*beatDur;
+
+  let seed=parseInt(document.getElementById('seedInput').value);
+  if(isNaN(seed)) seed=Math.floor(Math.random()*0xFFFFFF);
+  document.getElementById('seedDisp').textContent=seed;
+  seedRng(seed);
+
+  const [W,H]=getOutputSize();
+  sequence=[];
+  for(let b=0;b<totalBts;b++) sequence.push(makeClip(b*beatDur,images,W,H));
+
+  canvas.width=W; canvas.height=H; canvas.style.display='block';
+  initLayer(W,H);
+  document.getElementById('emptyState').style.display='none';
+  document.getElementById('hud').style.display='';
+  document.getElementById('playBtn').disabled=false;
+  document.getElementById('exportBtn').disabled=false;
+  resetPlay();
+}
+
+// ══════════════════════════════════════════════════════
+// Playback — absolute timestamp based, NO drift
+// ══════════════════════════════════════════════════════
+function togglePlay(){
+  if(!sequence.length) return;
+  isPlaying=!isPlaying;
+  const btn=document.getElementById('playBtn');
+  if(isPlaying){
+    btn.textContent='⏸ 停止';
+    playOrigin=-1; // resolved on first rAF frame
+    rafId=requestAnimationFrame(playLoop);
+  } else {
+    // pauseTime already kept current by playLoop each frame
+    cancelAnimationFrame(rafId);
+    btn.textContent='▶ 再生';
+  }
+}
+
+function playLoop(ts){
+  if(playOrigin===-1) playOrigin = ts/1000 - pauseTime;
+  const t = ts/1000 - playOrigin;
+  pauseTime = t; // keep updated so pause captures exact position
+  if(t >= totalDur){
+    renderFrame(totalDur);
+    isPlaying=false;
+    pauseTime=totalDur;
+    document.getElementById('playBtn').textContent='▶ 再生';
+    return;
+  }
+  renderFrame(t);
+  if(isPlaying) rafId=requestAnimationFrame(playLoop);
+}
+
+function resetPlay(){
+  cancelAnimationFrame(rafId);
+  isPlaying=false; pauseTime=0; playOrigin=0;
+  document.getElementById('playBtn').textContent='▶ 再生';
+  if(layerCtx){ layerCtx.clearRect(0,0,layerCvs.width,layerCvs.height); committed=0; }
+  if(sequence.length) renderFrame(0);
+}
+
+// ══════════════════════════════════════════════════════
+// LIVE MODE — absolute time, no dt accumulation
+// ══════════════════════════════════════════════════════
+function setMode(m){
+  mode=m;
+  document.getElementById('modeManual').className='mode-btn'+(m==='manual'?' active':'');
+  document.getElementById('modeLive').className  ='mode-btn'+(m==='live'?' live-active':'');
+  document.getElementById('manualControls').style.display=m==='manual'?'':'none';
+  document.getElementById('liveControls').style.display  =m==='live'?'':'none';
+  if(m==='manual'&&liveActive) stopLive();
+}
+
+function toggleLive(){ liveActive?stopLive():startLive(); }
+
+function startLive(){
+  if(!images.length) return;
+  liveActive=true; livePrevBeat=-1;
+  liveOrigin=-1; // will be set from first rAF ts
+  liveClips=[];
+
+  const [W,H]=getOutputSize();
+  canvas.width=W; canvas.height=H; canvas.style.display='block';
+  document.getElementById('emptyState').style.display='none';
+  document.getElementById('hud').style.display='';
+  document.getElementById('hudLive').style.display='';
+
+  liveLayerCvs=document.createElement('canvas');
+  liveLayerCvs.width=W; liveLayerCvs.height=H;
+  liveLayerCtx=liveLayerCvs.getContext('2d');
+
+  document.getElementById('liveStartBtn').textContent='■ LIVE STOP';
+  document.getElementById('liveStartBtn').className='btn btn-secondary';
+
+  liveRafId=requestAnimationFrame(liveLoop);
+}
+
+function stopLive(){
+  liveActive=false;
+  cancelAnimationFrame(liveRafId);
+  document.getElementById('liveStartBtn').textContent='⬡ LIVE START';
+  document.getElementById('liveStartBtn').className='btn btn-danger';
+  document.getElementById('hudLive').style.display='none';
+}
+
+function liveLoop(ts){
+  if(!liveActive) return;
+  // Set origin from the first rAF timestamp — eliminates startLive→rAF scheduling lag
+  if(liveOrigin===-1) liveOrigin=ts/1000;
+  const elapsed = ts/1000 - liveOrigin;
+  const bpm     = getBpm();
+  const beatDur = 60/bpm;
+  const beats   = getBeats();
+  const refresh = parseInt(document.getElementById('refreshRate').value);
+  const [W,H]   = getOutputSize();
+
+  // Spawn clip on beat boundary
+  const currentBeat = Math.floor(elapsed/beatDur);
+  if(currentBeat !== livePrevBeat && currentBeat%refresh===0){
+    livePrevBeat=currentBeat;
+    const pool=images.length>0?images:[];
+    if(pool.length) liveClips.push(makeClip(currentBeat*beatDur,pool,W,H));
+  }
+
+  // Bake finished clips
+  liveClips=liveClips.filter(c=>{
+    if(elapsed > c.startTime+c.duration){
+      renderClip(liveLayerCtx,c,1);
+      return false;
+    }
+    return true;
+  });
+
+  // Composite
+  ctx.clearRect(0,0,W,H);
+  drawBackground(ctx,W,H);
+  ctx.drawImage(liveLayerCvs,0,0);
+  liveClips.forEach(c=>{
+    const lt=Math.min(1,(elapsed-c.startTime)/c.duration);
+    if(lt>=0) renderClip(ctx,c,lt);
+  });
+  drawCenterText(ctx,W,H,elapsed);
+
+  updateHudBeat(elapsed);
+  if(liveActive) liveRafId=requestAnimationFrame(liveLoop);
+}
+
+// ══════════════════════════════════════════════════════
+// Export — pure frame-by-frame, no real-time wait
+// ══════════════════════════════════════════════════════
+async function startExport(){
+  if(!sequence.length) return;
+  const fps=parseInt(document.getElementById('exportFps').value);
+  const [W,H]=getOutputSize();
+  const totalFrames=Math.ceil(totalDur*fps);
+
+  const ov=document.getElementById('progOverlay');
+  const bar=document.getElementById('progFill');
+  const lbl=document.getElementById('progLabel');
+  const frm=document.getElementById('progFrame');
+  ov.classList.add('show');
+
+  // Separate offscreen canvases — never touch the live preview
+  const off=document.createElement('canvas'); off.width=W; off.height=H;
+  const oc=off.getContext('2d');
+  const exLayer=document.createElement('canvas'); exLayer.width=W; exLayer.height=H;
+  const elc=exLayer.getContext('2d');
+  let exCommitted=0;
+
+  // Collect all PNG blobs first (pure CPU, no timing dependency)
+  lbl.textContent='フレームをレンダリング中...';
+  const blobs=[];
+  for(let f=0;f<totalFrames;f++){
+    const t=f/fps;
+
+    // bake ended clips
+    while(exCommitted<sequence.length &&
+          sequence[exCommitted].startTime+sequence[exCommitted].duration < t){
+      renderClip(elc,sequence[exCommitted],1);
+      exCommitted++;
+    }
+
+    oc.clearRect(0,0,W,H);
+    drawBackground(oc,W,H);
+    oc.drawImage(exLayer,0,0);
+
+    for(let i=exCommitted;i<sequence.length;i++){
+      const clip=sequence[i];
+      if(clip.startTime>t) break;
+      renderClip(oc,clip,Math.min(1,(t-clip.startTime)/clip.duration));
+    }
+    drawCenterText(oc,W,H,t);
+
+    // toBlob is async but we await each one — deterministic ordering
+    const blob=await new Promise(res=>off.toBlob(res,'image/png'));
+    blobs.push(blob);
+
+    bar.style.width=((f+1)/totalFrames*60)+'%';
+    frm.textContent=`${f+1} / ${totalFrames} frames`;
+
+    // yield to prevent UI freeze every 10 frames
+    if(f%10===9) await new Promise(r=>setTimeout(r,0));
+  }
+
+  // Encode via MediaRecorder: manual frame stepping (captureStream(0)) —
+  // each frame is pushed explicitly via requestFrame(), so encoding speed
+  // is decoupled from real wall-clock time. This avoids the drift/lag that
+  // happens when decode+draw time eats into the real-time frame budget.
+  lbl.textContent='エンコード中...';
+  const sc=document.createElement('canvas'); sc.width=W; sc.height=H;
+  const sctx=sc.getContext('2d');
+  const chunks=[];
+  const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
+  const stream=sc.captureStream(0); // 0 = manual mode, no auto-driven fps
+  const track=stream.getVideoTracks()[0];
+  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:16_000_000});
+  rec.ondataavailable=e=>{if(e.data.size>0) chunks.push(e.data);};
+
+  const recStopped=new Promise(res=>rec.onstop=res);
+  rec.start();
+
+  const frameDelay=1000/fps;
+  const encodeStart=performance.now();
+  for(let i=0;i<blobs.length;i++){
+    const bmp=await createImageBitmap(blobs[i]);
+    sctx.clearRect(0,0,W,H);
+    sctx.drawImage(bmp,0,0);
+    bmp.close();
+    if(typeof track.requestFrame==='function') track.requestFrame();
+    bar.style.width=(60+(i+1)/blobs.length*38)+'%';
+
+    // Absolute-time pacing (no drift accumulation): wait until the exact
+    // wall-clock moment frame i+1 is due, accounting for time already
+    // spent decoding/drawing this frame. Fixes the lag/stutter caused by
+    // the old fixed per-iteration delay, which let real elapsed time creep
+    // past the target fps interval.
+    const targetElapsed=(i+1)*frameDelay;
+    const actualElapsed=performance.now()-encodeStart;
+    const wait=targetElapsed-actualElapsed;
+    if(wait>0) await new Promise(r=>setTimeout(r,wait));
+  }
+
+  rec.stop();
+  lbl.textContent='パッケージング中...';
+  await recStopped;
+
+  const blob2=new Blob(chunks,{type:'video/webm'});
+  const url=URL.createObjectURL(blob2);
+  const a=document.createElement('a'); a.href=url; a.download=`pixelsplit-${Date.now()}.webm`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),3000);
+  bar.style.width='100%';
+  ov.classList.remove('show');
+}
+
+// ══════════════════════════════════════════════════════
+// Fullscreen
+// ══════════════════════════════════════════════════════
+function toggleFullscreen(){
+  const el=document.getElementById('previewArea');
+  if(!document.fullscreenElement) el.requestFullscreen().catch(()=>{});
+  else document.exitFullscreen();
+}
+</script>
+</body>
+</html>
