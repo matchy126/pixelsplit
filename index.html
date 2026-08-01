@@ -563,74 +563,65 @@ function renderClip(destCtx, clip, t){
   const srcW=img.width, srcH=img.height;
   const spx=splitPos/100;
 
-  if(direction==='v'){
-    const splitX = Math.round(drawW*spx);
-    const lSrcW  = Math.round(srcW*spx);
-    const rSrcW  = srcW-lSrcW;
-    const rDstW  = drawW-splitX;
+  // ── Build split frame onto tmp ──
+  let tmp, placeDx, placeDy;
 
-    // tmp is always wide enough for both halves + the gap
-    const tmp=document.createElement('canvas');
+  if(direction==='v'){
+    const splitX=Math.round(drawW*spx);
+    const lSrcW =Math.round(srcW*spx);
+    const rSrcW =srcW-lSrcW;
+    const rDstW =drawW-splitX;
+
+    tmp=document.createElement('canvas');
     tmp.width=drawW+gap; tmp.height=drawH;
     const tc=tmp.getContext('2d');
 
-    if(movingSide===0){
-      // LEFT moves left → we shift entire content RIGHT by gap inside tmp,
-      // then place tmp at dx-gap so net effect is left side moves left.
-      // Inside tmp:  left at x=gap-gap=0..splitX, right at x=splitX+gap
-      // Wait — simpler: draw left at x=0, right at splitX+gap, stretch between.
-      // Place tmp at destCtx (dx - gap, dy).
-      tc.drawImage(img, 0,    0,lSrcW,srcH,  0,          0, splitX,  drawH); // left block at 0
-      tc.drawImage(img, lSrcW,0,rSrcW,srcH,  splitX+gap, 0, rDstW,   drawH); // right block shifted right
-      if(gap>0){
-        const sx=Math.min(srcW-1,lSrcW); // rightmost col of left half
-        tc.drawImage(img, sx,0,1,srcH,   splitX,     0, gap,     drawH); // stretch fills gap
-      }
-      destCtx.drawImage(tmp, dx-gap, dy);
-    } else {
-      // RIGHT moves right → left stays, right + stretch extend to the right.
-      // Place tmp at dx (extra width on right side is fine).
-      tc.drawImage(img, 0,    0,lSrcW,srcH,  0,          0, splitX,  drawH); // left fixed
-      tc.drawImage(img, lSrcW,0,rSrcW,srcH,  splitX+gap, 0, rDstW,   drawH); // right shifted right
-      if(gap>0){
-        const sx=Math.min(srcW-1,lSrcW);
-        tc.drawImage(img, sx,0,1,srcH,       splitX,     0, gap,     drawH); // stretch
-      }
-      destCtx.drawImage(tmp, dx, dy);
+    // Both sides: left at x=0, right at splitX+gap, stretch in between
+    tc.drawImage(img,0,    0,lSrcW,srcH, 0,          0,splitX, drawH);
+    tc.drawImage(img,lSrcW,0,rSrcW,srcH, splitX+gap, 0,rDstW,  drawH);
+    if(gap>0){
+      const sx=Math.min(srcW-1,lSrcW);
+      tc.drawImage(img,sx,0,1,srcH, splitX,0,gap,drawH);
     }
-  } else {
-    // Horizontal split
-    const splitY = Math.round(drawH*spx);
-    const tSrcH  = Math.round(srcH*spx);
-    const bSrcH  = srcH-tSrcH;
-    const bDstH  = drawH-splitY;
+    // movingSide=0: left moved left → place tmp gap px to the left
+    placeDx = (movingSide===0) ? dx-gap : dx;
+    placeDy = dy;
 
-    const tmp=document.createElement('canvas');
+  } else {
+    const splitY=Math.round(drawH*spx);
+    const tSrcH =Math.round(srcH*spx);
+    const bSrcH =srcH-tSrcH;
+    const bDstH =drawH-splitY;
+
+    tmp=document.createElement('canvas');
     tmp.width=drawW; tmp.height=drawH+gap;
     const tc=tmp.getContext('2d');
 
-    if(movingSide===0){
-      // TOP moves up → draw top at y=0, bottom at splitY+gap, stretch between.
-      // Place tmp at (dx, dy-gap).
-      tc.drawImage(img, 0,0,    srcW,tSrcH,  0, 0,          drawW, splitY); // top at 0
-      tc.drawImage(img, 0,tSrcH,srcW,bSrcH,  0, splitY+gap, drawW, bDstH); // bottom shifted down
-      if(gap>0){
-        const sy=Math.min(srcH-1,tSrcH);
-        tc.drawImage(img, 0,sy,srcW,1,        0, splitY,     drawW, gap);   // stretch
-      }
-      destCtx.drawImage(tmp, dx, dy-gap);
-    } else {
-      // BOTTOM moves down → top stays, bottom + stretch extend downward.
-      // Place tmp at (dx, dy).
-      tc.drawImage(img, 0,0,    srcW,tSrcH,  0, 0,          drawW, splitY); // top fixed
-      tc.drawImage(img, 0,tSrcH,srcW,bSrcH,  0, splitY+gap, drawW, bDstH); // bottom shifted
-      if(gap>0){
-        const sy=Math.min(srcH-1,tSrcH);
-        tc.drawImage(img, 0,sy,srcW,1,        0, splitY,     drawW, gap);   // stretch
-      }
-      destCtx.drawImage(tmp, dx, dy);
+    tc.drawImage(img,0,0,    srcW,tSrcH, 0,0,         drawW,splitY);
+    tc.drawImage(img,0,tSrcH,srcW,bSrcH, 0,splitY+gap,drawW,bDstH);
+    if(gap>0){
+      const sy=Math.min(srcH-1,tSrcH);
+      tc.drawImage(img,0,sy,srcW,1, 0,splitY,drawW,gap);
     }
+    placeDx = dx;
+    // movingSide=0: top moved up → place tmp gap px upward
+    placeDy = (movingSide===0) ? dy-gap : dy;
   }
+
+  // ── Zoom: scale from zoomStart→1.0 centered on image center ──
+  // t=0 → zoomStart (small), t=1 → 1.0 (full size)
+  const zoomStart = 0.55;
+  const scale = zoomStart + (1 - zoomStart) * t; // linear zoom in
+
+  // Center of the (placed) tmp on destCtx
+  const cx = placeDx + tmp.width  / 2;
+  const cy = placeDy + tmp.height / 2;
+
+  destCtx.save();
+  destCtx.translate(cx, cy);
+  destCtx.scale(scale, scale);
+  destCtx.drawImage(tmp, -tmp.width/2, -tmp.height/2);
+  destCtx.restore();
 }
 
 // ══════════════════════════════════════════════════════
