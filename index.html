@@ -296,13 +296,13 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM Mon
 // ══════════════════════════════════════════════════════
 // RNG (seeded)
 // ══════════════════════════════════════════════════════
-let _rng = 0;
-function seedRng(s){ _rng = s>>>0; }
+let _rng=0;
+function seedRng(s){_rng=s>>>0;}
 function rng(){
-  _rng|=0; _rng=_rng+0x6D2B79F5|0;
+  _rng|=0;_rng=_rng+0x6D2B79F5|0;
   let t=Math.imul(_rng^_rng>>>15,1|_rng);
   t=t+Math.imul(t^t>>>7,61|t)^t;
-  return ((t^t>>>14)>>>0)/4294967296;
+  return((t^t>>>14)>>>0)/4294967296;
 }
 function rngInt(a,b){return Math.floor(rng()*(b-a+1))+a;}
 function rngPick(arr){return arr[Math.floor(rng()*arr.length)];}
@@ -310,110 +310,89 @@ function rngPick(arr){return arr[Math.floor(rng()*arr.length)];}
 // ══════════════════════════════════════════════════════
 // State
 // ══════════════════════════════════════════════════════
-let images   = [];
-let bgImage  = null;
-let sequence = [];
-let totalDur = 0;
-let mode     = 'manual';
+let images=[], bgImage=null, sequence=[], totalDur=0, mode='manual';
 
-// Manual playback — uses absolute timestamps, never accumulated dt
-let isPlaying   = false;
-let playOrigin  = 0;   // performance.now() when play started
-let pauseTime   = 0;   // seconds elapsed when paused
-let rafId       = null;
+// Manual playback
+let isPlaying=false, playOrigin=-1, pauseTime=0, rafId=null;
 
-// Layer accumulation
-let layerCvs = null, layerCtx = null;
-let committed = 0;
+// Layer (clips baked here, never zoomed)
+let layerCvs=null, layerCtx=null, committed=0;
 
-// Global zoom state
-// worldCvs: クリップをズームなしで蓄積するバッファ（出力解像度と同サイズ）
-// zoomScale: 現在の倍率（1.0から増え続ける）
-// zoomLastT: 前フレームのt
-let worldCvs = null, worldCtx = null;
-let zoomScale = 1.0;
-let zoomLastT = 0;
+// ── accumCvs: 前フレームのスクリーン画像を保持するバッファ
+// 毎フレーム: accumCvs をズームして描画 → 新clip追加 → 結果をaccumCvsに保存
+// これにより「画面全体が前フレームを拡大し続ける」フィードバックズームになる
+let accumCvs=null, accumCtx=null;
+let zoomLastT=0;
 
 // Live mode
-let liveActive  = false;
-let liveOrigin  = 0;   // performance.now() when live started
-let liveLayerCvs= null, liveLayerCtx = null;
-let liveClips   = [];
-let livePrevBeat= -1;
-let liveRafId   = null;
+let liveActive=false, liveOrigin=-1;
+let liveLayerCvs=null, liveLayerCtx=null;
+let liveAccumCvs=null, liveAccumCtx=null;
+let liveZoomLastT=0;
+let liveClips=[], livePrevBeat=-1, liveRafId=null;
 
-const canvas = document.getElementById('previewCanvas');
-const ctx    = canvas.getContext('2d');
+const canvas=document.getElementById('previewCanvas');
+const ctx=canvas.getContext('2d');
 
 // ══════════════════════════════════════════════════════
 // Background
 // ══════════════════════════════════════════════════════
-function setupBgDrop(inputId, dropId){
-  const input = document.getElementById(inputId);
-  const drop  = document.getElementById(dropId);
-  input.addEventListener('change', e=>{ if(e.target.files[0]) applyBg(URL.createObjectURL(e.target.files[0])); });
-  drop.addEventListener('dragover',  e=>{ e.preventDefault(); drop.classList.add('drag'); });
-  drop.addEventListener('dragleave', ()=>drop.classList.remove('drag'));
-  drop.addEventListener('drop', e=>{
-    e.preventDefault(); drop.classList.remove('drag');
+function setupBgDrop(inputId,dropId){
+  const input=document.getElementById(inputId);
+  const drop=document.getElementById(dropId);
+  input.addEventListener('change',e=>{if(e.target.files[0])applyBg(URL.createObjectURL(e.target.files[0]));});
+  drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('drag');});
+  drop.addEventListener('dragleave',()=>drop.classList.remove('drag'));
+  drop.addEventListener('drop',e=>{
+    e.preventDefault();drop.classList.remove('drag');
     const f=e.dataTransfer.files[0];
-    if(f&&f.type.startsWith('image/')) applyBg(URL.createObjectURL(f));
+    if(f&&f.type.startsWith('image/'))applyBg(URL.createObjectURL(f));
   });
 }
 function applyBg(url){
   const img=new Image();
-  img.onload=()=>{
-    bgImage=img;
-    const w=document.getElementById('bgThumbWrap');
-    w.innerHTML=`<img src="${url}"><button class="bg-clear" onclick="clearBg()">✕</button>`;
-  };
+  img.onload=()=>{bgImage=img;document.getElementById('bgThumbWrap').innerHTML=`<img src="${url}"><button class="bg-clear" onclick="clearBg()">✕</button>`;};
   img.src=url;
 }
-function clearBg(){
-  bgImage=null;
-  document.getElementById('bgThumbWrap').innerHTML='<span class="no-bg">なし</span>';
-}
+function clearBg(){bgImage=null;document.getElementById('bgThumbWrap').innerHTML='<span class="no-bg">なし</span>';}
 setupBgDrop('bgFileInput','bgDropZone');
 
 ['centerTextInput','centerFont','centerColor','centerAlign'].forEach(id=>{
-  document.getElementById(id).addEventListener('input', ()=>{ if(sequence.length) renderFrame(pauseTime||0); });
+  document.getElementById(id).addEventListener('input',()=>{if(sequence.length)renderFrame(pauseTime||0);});
 });
 
 // ══════════════════════════════════════════════════════
 // Clip images
 // ══════════════════════════════════════════════════════
-document.getElementById('fileInput').addEventListener('change', e=>loadFiles(Array.from(e.target.files)));
+document.getElementById('fileInput').addEventListener('change',e=>loadFiles(Array.from(e.target.files)));
 const dz=document.getElementById('dropZone');
-dz.addEventListener('dragover',  e=>{ e.preventDefault(); dz.classList.add('drag'); });
-dz.addEventListener('dragleave', ()=>dz.classList.remove('drag'));
-dz.addEventListener('drop', e=>{
-  e.preventDefault(); dz.classList.remove('drag');
-  loadFiles(Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/')));
-});
+dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');});
+dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
+dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');loadFiles(Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/')));});
 
 async function loadFiles(files){
   files=files.filter(f=>f.type.startsWith('image/'));
-  if(!files.length) return;
+  if(!files.length)return;
   for(const f of files){
     await new Promise(res=>{
-      const img=new Image(), url=URL.createObjectURL(f);
-      img.onload=()=>{ images.push({name:f.name,img,url}); res(); };
-      img.onerror=res; img.src=url;
+      const img=new Image(),url=URL.createObjectURL(f);
+      img.onload=()=>{images.push({name:f.name,img,url});res();};
+      img.onerror=res;img.src=url;
     });
   }
-  updateImgList(); checkReady();
+  updateImgList();checkReady();
 }
 function updateImgList(){
   document.getElementById('imgCount').textContent=images.length;
   const list=document.getElementById('imgList');
   list.innerHTML='';
   images.forEach((item,i)=>{
-    const d=document.createElement('div'); d.className='img-item';
+    const d=document.createElement('div');d.className='img-item';
     d.innerHTML=`<img class="thumb" src="${item.url}"><span class="fname">${item.name}</span><button class="rm" onclick="removeImg(${i})">✕</button>`;
     list.appendChild(d);
   });
 }
-function removeImg(i){ URL.revokeObjectURL(images[i].url); images.splice(i,1); updateImgList(); checkReady(); }
+function removeImg(i){URL.revokeObjectURL(images[i].url);images.splice(i,1);updateImgList();checkReady();}
 function checkReady(){
   const ok=images.length>0;
   document.getElementById('genBtn').disabled=!ok;
@@ -423,50 +402,17 @@ function checkReady(){
 // ══════════════════════════════════════════════════════
 // Helpers
 // ══════════════════════════════════════════════════════
-function getOutputSize(){ return document.getElementById('resSel').value.split('x').map(Number); }
-function getBpm(){ return parseFloat(document.getElementById('bpmInput').value)||128; }
-function getBeats(){ return parseInt(document.getElementById('timeSig').value); }
+function getOutputSize(){return document.getElementById('resSel').value.split('x').map(Number);}
+function getBpm(){return parseFloat(document.getElementById('bpmInput').value)||128;}
+function getBeats(){return parseInt(document.getElementById('timeSig').value);}
+function getZoomRate(){return(parseInt(document.getElementById('zoomRate').value)||0)/100;}
 
 function drawBackground(c,W,H){
   if(bgImage){
     const r=Math.max(W/bgImage.width,H/bgImage.height);
-    const bw=bgImage.width*r, bh=bgImage.height*r;
+    const bw=bgImage.width*r,bh=bgImage.height*r;
     c.drawImage(bgImage,(W-bw)/2,(H-bh)/2,bw,bh);
-  }else{
-    c.fillStyle='#08080a'; c.fillRect(0,0,W,H);
-  }
-}
-
-function getZoomRate(){ return (parseInt(document.getElementById('zoomRate').value)||0)/100; }
-
-// worldCvs に不要なピクセル（画面外）を削除する
-// 現在のzoomScaleで、worldの点(wx,wy)は画面上の (cx+(wx-cx)*zoom, cy+(wy-cy)*zoom) に投影される。
-// zoom>=1なので、世界座標で |wx-cx| > W/(2*zoom) の列は画面外 → clearRect で消せる
-function pruneWorld_live(W,H){
-  if(!liveLayerCtx||zoomScale<=1.0) return;
-  const cx=W/2,cy=H/2;
-  const hw=W/(2*zoomScale), hh=H/(2*zoomScale);
-  const x0=Math.floor(cx-hw),y0=Math.floor(cy-hh);
-  const x1=Math.ceil(cx+hw), y1=Math.ceil(cy+hh);
-  if(x0>0) liveLayerCtx.clearRect(0,0,x0,H);
-  if(x1<W) liveLayerCtx.clearRect(x1,0,W-x1,H);
-  if(y0>0) liveLayerCtx.clearRect(0,0,W,y0);
-  if(y1<H) liveLayerCtx.clearRect(0,y1,W,H-y1);
-}
-
-function pruneWorld(W, H){
-  if(!worldCtx || zoomScale <= 1.0) return;
-  const cx=W/2, cy=H/2;
-  // visible world rect (in world coords)
-  const hw = W/(2*zoomScale);  // half-width in world space that maps to screen edge
-  const hh = H/(2*zoomScale);
-  const x0=Math.floor(cx-hw), y0=Math.floor(cy-hh);
-  const x1=Math.ceil(cx+hw),  y1=Math.ceil(cy+hh);
-  // clear outside strips
-  if(x0>0)  worldCtx.clearRect(0,   0, x0,    H);
-  if(x1<W)  worldCtx.clearRect(x1,  0, W-x1,  H);
-  if(y0>0)  worldCtx.clearRect(0,   0, W,      y0);
-  if(y1<H)  worldCtx.clearRect(0,  y1, W,      H-y1);
+  }else{c.fillStyle='#08080a';c.fillRect(0,0,W,H);}
 }
 
 function updateHudBeat(t){
@@ -483,290 +429,212 @@ function updateHudBeat(t){
 let centerFx='none';
 function setCenterFx(fx){
   centerFx=fx;
-  ['centerFxNone','centerFxPulse','centerFxGlitch'].forEach(id=>{
-    document.getElementById(id).className='mode-btn';
-  });
+  ['centerFxNone','centerFxPulse','centerFxGlitch'].forEach(id=>{document.getElementById(id).className='mode-btn';});
   document.getElementById('centerFx'+fx.charAt(0).toUpperCase()+fx.slice(1)).className='mode-btn active';
-  if(sequence.length) renderFrame(pauseTime||0);
+  if(sequence.length)renderFrame(pauseTime||0);
 }
-
 function drawCenterText(c,W,H,t){
   const text=document.getElementById('centerTextInput').value;
-  if(!text) return;
-
-  const sizePct  = parseInt(document.getElementById('centerSize').value);
-  const fontFam  = document.getElementById('centerFont').value;
-  const color    = document.getElementById('centerColor').value;
-  const align    = document.getElementById('centerAlign').value;
-  const strokeW  = parseInt(document.getElementById('centerStroke').value);
-
-  let fontSize = Math.round(Math.min(W,H)*sizePct/100);
-  let cx=W/2, cy=H/2;
-  let alpha=1, ox=0, oy=0, glitchOffset=0;
-
+  if(!text)return;
+  const sizePct=parseInt(document.getElementById('centerSize').value);
+  const fontFam=document.getElementById('centerFont').value;
+  const color=document.getElementById('centerColor').value;
+  const align=document.getElementById('centerAlign').value;
+  const strokeW=parseInt(document.getElementById('centerStroke').value);
+  let fontSize=Math.round(Math.min(W,H)*sizePct/100);
+  let cx=W/2,cy=H/2,ox=0,oy=0,glitchOffset=0;
   const beatDur=60/getBpm();
-  const beatPhase = (t%beatDur)/beatDur; // 0..1 within current beat
-
+  const beatPhase=(t%beatDur)/beatDur;
   if(centerFx==='pulse'){
-    // scale pulses 1.0 -> 1.18 -> 1.0 on each beat
     const s=1+0.18*Math.sin(Math.PI*Math.min(1,beatPhase*2));
     fontSize=Math.round(fontSize*(beatPhase<0.5?s:1));
-  } else if(centerFx==='glitch'){
-    // brief jitter right after each beat
-    if(beatPhase<0.12){
-      glitchOffset=(rngLikeJitter(t)-0.5)*fontSize*0.25;
-      ox=glitchOffset;
-    }
+  }else if(centerFx==='glitch'){
+    if(beatPhase<0.12){glitchOffset=(rngLikeJitter(t)-0.5)*fontSize*0.25;ox=glitchOffset;}
   }
-
-  if(align==='top') cy=fontSize*0.9;
-  else if(align==='bottom') cy=H-fontSize*0.6;
-
+  if(align==='top')cy=fontSize*0.9;
+  else if(align==='bottom')cy=H-fontSize*0.6;
   c.save();
   c.font=`800 ${fontSize}px ${fontFam}`;
-  c.textAlign='center';
-  c.textBaseline='middle';
-  c.lineJoin='round';
-
-  if(centerFx==='glitch' && glitchOffset!==0){
-    // RGB-split style glitch
+  c.textAlign='center';c.textBaseline='middle';c.lineJoin='round';
+  if(centerFx==='glitch'&&glitchOffset!==0){
     c.globalAlpha=0.6;
-    c.fillStyle='#ff4060';
-    c.fillText(text, cx+ox-2, cy+oy);
-    c.fillStyle='#47e8ff';
-    c.fillText(text, cx+ox+2, cy+oy);
+    c.fillStyle='#ff4060';c.fillText(text,cx+ox-2,cy+oy);
+    c.fillStyle='#47e8ff';c.fillText(text,cx+ox+2,cy+oy);
     c.globalAlpha=1;
   }
-
-  if(strokeW>0){
-    c.strokeStyle='#08080a';
-    c.lineWidth=strokeW;
-    c.strokeText(text, cx+ox, cy+oy);
-  }
-  c.fillStyle=color;
-  c.fillText(text, cx+ox, cy+oy);
+  if(strokeW>0){c.strokeStyle='#08080a';c.lineWidth=strokeW;c.strokeText(text,cx+ox,cy+oy);}
+  c.fillStyle=color;c.fillText(text,cx+ox,cy+oy);
   c.restore();
 }
-// simple deterministic pseudo-jitter based on time, so glitch is stable per-frame (no RNG stream pollution)
-function rngLikeJitter(t){
-  const x=Math.sin(t*999.123)*43758.5453;
-  return x-Math.floor(x);
-}
+function rngLikeJitter(t){const x=Math.sin(t*999.123)*43758.5453;return x-Math.floor(x);}
 
 // ══════════════════════════════════════════════════════
 // Clip factory
 // ══════════════════════════════════════════════════════
-function makeClip(startTime, pool, outW, outH){
-  const imgItem    = rngPick(pool);
-  const img        = imgItem.img;
-  const direction  = rng()<.5?'v':'h';
-  const movingSide = rng()<.5?0:1;
-  const posR       = rng();
-  const splitPos   = posR<.33?1:posR<.66?rngInt(40,60):99;
-
-  // Size: 15%~75% of output short side
-  const shortSide   = Math.min(outW,outH);
-  const scaleFactor = 0.15 + rng()*0.60;
-  const aspect      = img.width/img.height;
+function makeClip(startTime,pool,outW,outH){
+  const imgItem=rngPick(pool);
+  const img=imgItem.img;
+  const direction=rng()<.5?'v':'h';
+  const movingSide=rng()<.5?0:1;
+  const posR=rng();
+  const splitPos=posR<.33?1:posR<.66?rngInt(40,60):99;
+  const shortSide=Math.min(outW,outH);
+  const scaleFactor=0.15+rng()*0.60;
+  const aspect=img.width/img.height;
   let drawW,drawH;
-  if(aspect>=1){ drawW=Math.round(shortSide*scaleFactor); drawH=Math.round(drawW/aspect); }
-  else          { drawH=Math.round(shortSide*scaleFactor); drawW=Math.round(drawH*aspect); }
-
-  // maxGap proportional to draw size: 30%~120% of relevant dimension
-  const drawDim = direction==='v' ? drawW : drawH;
-  const maxGap  = Math.round(drawDim * (0.30 + rng()*0.90));
-
-  // Center can be anywhere on canvas
-  const cx=rngInt(0,outW), cy=rngInt(0,outH);
-  const dx=cx-Math.floor(drawW/2);
-  const dy=cy-Math.floor(drawH/2);
-
-  return {startTime,duration:0.3,imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx,dy};
+  if(aspect>=1){drawW=Math.round(shortSide*scaleFactor);drawH=Math.round(drawW/aspect);}
+  else{drawH=Math.round(shortSide*scaleFactor);drawW=Math.round(drawH*aspect);}
+  const drawDim=direction==='v'?drawW:drawH;
+  const maxGap=Math.round(drawDim*(0.30+rng()*0.90));
+  const cx=rngInt(0,outW),cy=rngInt(0,outH);
+  const dx=cx-Math.floor(drawW/2),dy=cy-Math.floor(drawH/2);
+  return{startTime,duration:0.3,imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx,dy};
 }
 
 // ══════════════════════════════════════════════════════
 // Clip renderer
-//
-// Strategy: always draw everything INSIDE the tmp canvas
-// by adding a positive offset equal to gap (for the side
-// that moves in the negative direction). Then compensate
-// when placing tmp on destCtx.
-//
-// Vertical split:
-//   movingSide=0 (left moves left):
-//     - tmp is (drawW + gap) wide
-//     - draw left at x=0 (natural), right at x=splitX+gap
-//     - 1px stretch fills splitX → splitX+gap
-//     - place tmp at destCtx x = dx-gap  (shifts content left by gap)
-//   movingSide=1 (right moves right):
-//     - tmp is (drawW + gap) wide
-//     - draw left at x=0, right at x=splitX+gap
-//     - 1px stretch fills splitX → splitX+gap
-//     - place tmp at destCtx x = dx  (right side extends beyond drawW, fine)
-//
-// Horizontal: same logic on Y axis.
 // ══════════════════════════════════════════════════════
-function renderClip(destCtx, clip, t){
-  const {imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx,dy}=clip;
+function renderClip(destCtx,clip,t){
+  const{imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx,dy}=clip;
   const img=imgItem.img;
   const gap=Math.round(t*maxGap);
-
-  const srcW=img.width, srcH=img.height;
+  const srcW=img.width,srcH=img.height;
   const spx=splitPos/100;
 
   if(direction==='v'){
-    const splitX = Math.round(drawW*spx);
-    const lSrcW  = Math.round(srcW*spx);
-    const rSrcW  = srcW-lSrcW;
-    const rDstW  = drawW-splitX;
-
-    // tmp is always wide enough for both halves + the gap
+    const splitX=Math.round(drawW*spx);
+    const lSrcW=Math.round(srcW*spx),rSrcW=srcW-lSrcW,rDstW=drawW-splitX;
     const tmp=document.createElement('canvas');
-    tmp.width=drawW+gap; tmp.height=drawH;
+    tmp.width=drawW+gap;tmp.height=drawH;
     const tc=tmp.getContext('2d');
-
     if(movingSide===0){
-      // LEFT moves left → we shift entire content RIGHT by gap inside tmp,
-      // then place tmp at dx-gap so net effect is left side moves left.
-      // Inside tmp:  left at x=gap-gap=0..splitX, right at x=splitX+gap
-      // Wait — simpler: draw left at x=0, right at splitX+gap, stretch between.
-      // Place tmp at destCtx (dx - gap, dy).
-      tc.drawImage(img, 0,    0,lSrcW,srcH,  0,          0, splitX,  drawH); // left block at 0
-      tc.drawImage(img, lSrcW,0,rSrcW,srcH,  splitX+gap, 0, rDstW,   drawH); // right block shifted right
-      if(gap>0){
-        const sx=Math.min(srcW-1,lSrcW); // rightmost col of left half
-        tc.drawImage(img, sx,0,1,srcH,   splitX,     0, gap,     drawH); // stretch fills gap
-      }
-      destCtx.drawImage(tmp, dx-gap, dy);
-    } else {
-      // RIGHT moves right → left stays, right + stretch extend to the right.
-      // Place tmp at dx (extra width on right side is fine).
-      tc.drawImage(img, 0,    0,lSrcW,srcH,  0,          0, splitX,  drawH); // left fixed
-      tc.drawImage(img, lSrcW,0,rSrcW,srcH,  splitX+gap, 0, rDstW,   drawH); // right shifted right
-      if(gap>0){
-        const sx=Math.min(srcW-1,lSrcW);
-        tc.drawImage(img, sx,0,1,srcH,       splitX,     0, gap,     drawH); // stretch
-      }
-      destCtx.drawImage(tmp, dx, dy);
+      tc.drawImage(img,0,0,lSrcW,srcH,0,0,splitX,drawH);
+      tc.drawImage(img,lSrcW,0,rSrcW,srcH,splitX+gap,0,rDstW,drawH);
+      if(gap>0){const sx=Math.min(srcW-1,lSrcW);tc.drawImage(img,sx,0,1,srcH,splitX,0,gap,drawH);}
+      destCtx.drawImage(tmp,dx-gap,dy);
+    }else{
+      tc.drawImage(img,0,0,lSrcW,srcH,0,0,splitX,drawH);
+      tc.drawImage(img,lSrcW,0,rSrcW,srcH,splitX+gap,0,rDstW,drawH);
+      if(gap>0){const sx=Math.min(srcW-1,lSrcW);tc.drawImage(img,sx,0,1,srcH,splitX,0,gap,drawH);}
+      destCtx.drawImage(tmp,dx,dy);
     }
-  } else {
-    // Horizontal split
-    const splitY = Math.round(drawH*spx);
-    const tSrcH  = Math.round(srcH*spx);
-    const bSrcH  = srcH-tSrcH;
-    const bDstH  = drawH-splitY;
-
+  }else{
+    const splitY=Math.round(drawH*spx);
+    const tSrcH=Math.round(srcH*spx),bSrcH=srcH-tSrcH,bDstH=drawH-splitY;
     const tmp=document.createElement('canvas');
-    tmp.width=drawW; tmp.height=drawH+gap;
+    tmp.width=drawW;tmp.height=drawH+gap;
     const tc=tmp.getContext('2d');
-
     if(movingSide===0){
-      // TOP moves up → draw top at y=0, bottom at splitY+gap, stretch between.
-      // Place tmp at (dx, dy-gap).
-      tc.drawImage(img, 0,0,    srcW,tSrcH,  0, 0,          drawW, splitY); // top at 0
-      tc.drawImage(img, 0,tSrcH,srcW,bSrcH,  0, splitY+gap, drawW, bDstH); // bottom shifted down
-      if(gap>0){
-        const sy=Math.min(srcH-1,tSrcH);
-        tc.drawImage(img, 0,sy,srcW,1,        0, splitY,     drawW, gap);   // stretch
-      }
-      destCtx.drawImage(tmp, dx, dy-gap);
-    } else {
-      // BOTTOM moves down → top stays, bottom + stretch extend downward.
-      // Place tmp at (dx, dy).
-      tc.drawImage(img, 0,0,    srcW,tSrcH,  0, 0,          drawW, splitY); // top fixed
-      tc.drawImage(img, 0,tSrcH,srcW,bSrcH,  0, splitY+gap, drawW, bDstH); // bottom shifted
-      if(gap>0){
-        const sy=Math.min(srcH-1,tSrcH);
-        tc.drawImage(img, 0,sy,srcW,1,        0, splitY,     drawW, gap);   // stretch
-      }
-      destCtx.drawImage(tmp, dx, dy);
+      tc.drawImage(img,0,0,srcW,tSrcH,0,0,drawW,splitY);
+      tc.drawImage(img,0,tSrcH,srcW,bSrcH,0,splitY+gap,drawW,bDstH);
+      if(gap>0){const sy=Math.min(srcH-1,tSrcH);tc.drawImage(img,0,sy,srcW,1,0,splitY,drawW,gap);}
+      destCtx.drawImage(tmp,dx,dy-gap);
+    }else{
+      tc.drawImage(img,0,0,srcW,tSrcH,0,0,drawW,splitY);
+      tc.drawImage(img,0,tSrcH,srcW,bSrcH,0,splitY+gap,drawW,bDstH);
+      if(gap>0){const sy=Math.min(srcH-1,tSrcH);tc.drawImage(img,0,sy,srcW,1,0,splitY,drawW,gap);}
+      destCtx.drawImage(tmp,dx,dy);
     }
   }
 }
 
 // ══════════════════════════════════════════════════════
-// Layer management
+// Layer management (clips baked at t=1, no zoom applied here)
 // ══════════════════════════════════════════════════════
 function initLayer(W,H){
-  layerCvs=document.createElement('canvas');
-  layerCvs.width=W; layerCvs.height=H;
-  layerCtx=layerCvs.getContext('2d');
-  committed=0;
-  // worldCvs: クリップ蓄積バッファ（ズームなし）
-  worldCvs=document.createElement('canvas');
-  worldCvs.width=W; worldCvs.height=H;
-  worldCtx=worldCvs.getContext('2d');
-  zoomScale=1.0; zoomLastT=0;
+  layerCvs=document.createElement('canvas');layerCvs.width=W;layerCvs.height=H;
+  layerCtx=layerCvs.getContext('2d');committed=0;
+  accumCvs=null;accumCtx=null;zoomLastT=0;
 }
-function buildLayerUpTo(idx, W, H){
-  for(let i=committed;i<idx;i++){
-    renderClip(worldCtx,sequence[i],1);   // ← worldCtx に焼き込む
-    if((i+1)%16===0) pruneWorld(W,H);     // 16枚ごとに画面外を削除
-  }
+function buildLayerUpTo(idx){
+  for(let i=committed;i<idx;i++) renderClip(layerCtx,sequence[i],1);
   committed=Math.max(committed,idx);
 }
 
 // ══════════════════════════════════════════════════════
-// Frame render
+// accum helpers: 前フレームをズームしてcanvasに焼き込む
 // ══════════════════════════════════════════════════════
-function renderFrame(t){
-  if(!sequence.length) return;
-  const W=canvas.width, H=canvas.height;
-
-  // ── ズーム倍率を更新（指数的に増加）
-  const rate = getZoomRate();
-  const dt   = Math.max(0, t - zoomLastT);
-  if(dt>0) zoomScale *= Math.pow(1+rate, dt);
-  zoomLastT = t;
-
-  let firstActive=0;
-  while(firstActive<sequence.length &&
-        sequence[firstActive].startTime+sequence[firstActive].duration < t) firstActive++;
-  buildLayerUpTo(firstActive, W, H);
-
-  // ── 描画: 背景 → グローバルzoom変換の中にworldと進行中クリップを描く → テキスト
-  ctx.clearRect(0,0,W,H);
-  drawBackground(ctx,W,H);
-
-  const cx=W/2, cy=H/2;
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.scale(zoomScale, zoomScale);
-  ctx.translate(-cx, -cy);
-  // 蓄積済みworld（ズーム空間内）
-  ctx.drawImage(worldCvs,0,0);
-  // 進行中クリップ（ズーム空間内に通常サイズで描く → 画面上では拡大表示される）
-  for(let i=firstActive;i<sequence.length;i++){
-    const clip=sequence[i];
-    if(clip.startTime>t) break;
-    renderClip(ctx,clip,Math.min(1,(t-clip.startTime)/clip.duration));
+function applyAccumZoom(destCtx, src, W, H, dt, rate){
+  // src(前フレーム画像) を中心向きにズームしてdestCtxへ描画
+  if(rate>0 && dt>0){
+    const s=Math.pow(1+rate,dt);
+    const cx=W/2,cy=H/2;
+    destCtx.save();
+    destCtx.translate(cx,cy);
+    destCtx.scale(s,s);
+    destCtx.translate(-cx,-cy);
+    destCtx.drawImage(src,0,0);
+    destCtx.restore();
+  }else{
+    destCtx.drawImage(src,0,0);
   }
-  ctx.restore();
-
-  drawCenterText(ctx,W,H,t);
-  updateHudBeat(t);
 }
 
 // ══════════════════════════════════════════════════════
-// Sequence generation (manual mode)
+// Frame render (manual mode)
+// 手順: 背景 → 前フレームをズーム → 焼き済みlayer → アクティブclip → テキスト
+//       → 今のcanvasをaccumCvsにコピー（次フレームの入力）
+// ══════════════════════════════════════════════════════
+function renderFrame(t){
+  if(!sequence.length)return;
+  const W=canvas.width,H=canvas.height;
+  const rate=getZoomRate();
+  const dt=Math.max(0,t-zoomLastT);
+  zoomLastT=t;
+
+  // accumCvs 初期化（最初のフレームまたはリセット後）
+  if(!accumCvs||accumCvs.width!==W||accumCvs.height!==H){
+    accumCvs=document.createElement('canvas');accumCvs.width=W;accumCvs.height=H;
+    accumCtx=accumCvs.getContext('2d');
+    drawBackground(accumCtx,W,H);
+  }
+
+  let firstActive=0;
+  while(firstActive<sequence.length&&sequence[firstActive].startTime+sequence[firstActive].duration<t) firstActive++;
+  buildLayerUpTo(firstActive);
+
+  // 1. 背景（固定）
+  ctx.clearRect(0,0,W,H);
+  drawBackground(ctx,W,H);
+
+  // 2. 前フレームをズームして重ねる（画面全体が中心に向かって拡大）
+  applyAccumZoom(ctx,accumCvs,W,H,dt,rate);
+
+  // 3. 焼き済みlayer（ズーム済みaccumに積み重なる形で等倍描画）
+  ctx.drawImage(layerCvs,0,0);
+
+  // 4. アクティブなclip（等倍）
+  for(let i=firstActive;i<sequence.length;i++){
+    const clip=sequence[i];
+    if(clip.startTime>t)break;
+    renderClip(ctx,clip,Math.min(1,(t-clip.startTime)/clip.duration));
+  }
+
+  // 5. テキスト（ズームに乗らない）
+  drawCenterText(ctx,W,H,t);
+  updateHudBeat(t);
+
+  // 6. 今のフレームをaccumCvsへ保存（次フレームへ）
+  accumCtx.clearRect(0,0,W,H);
+  accumCtx.drawImage(canvas,0,0);
+}
+
+// ══════════════════════════════════════════════════════
+// Sequence generation
 // ══════════════════════════════════════════════════════
 function generateSeq(){
-  if(!images.length) return;
-  const bpm=getBpm(), bars=parseInt(document.getElementById('barsRange').value);
-  const beats=getBeats(), beatDur=60/bpm;
-  const totalBts=bars*beats;
+  if(!images.length)return;
+  const bpm=getBpm(),bars=parseInt(document.getElementById('barsRange').value);
+  const beats=getBeats(),beatDur=60/bpm,totalBts=bars*beats;
   totalDur=totalBts*beatDur;
-
   let seed=parseInt(document.getElementById('seedInput').value);
-  if(isNaN(seed)) seed=Math.floor(Math.random()*0xFFFFFF);
+  if(isNaN(seed))seed=Math.floor(Math.random()*0xFFFFFF);
   document.getElementById('seedDisp').textContent=seed;
   seedRng(seed);
-
   const [W,H]=getOutputSize();
   sequence=[];
   for(let b=0;b<totalBts;b++) sequence.push(makeClip(b*beatDur,images,W,H));
-
-  canvas.width=W; canvas.height=H; canvas.style.display='block';
+  canvas.width=W;canvas.height=H;canvas.style.display='block';
   initLayer(W,H);
   document.getElementById('emptyState').style.display='none';
   document.getElementById('hud').style.display='';
@@ -776,50 +644,36 @@ function generateSeq(){
 }
 
 // ══════════════════════════════════════════════════════
-// Playback — absolute timestamp based, NO drift
+// Playback
 // ══════════════════════════════════════════════════════
 function togglePlay(){
-  if(!sequence.length) return;
+  if(!sequence.length)return;
   isPlaying=!isPlaying;
   const btn=document.getElementById('playBtn');
   if(isPlaying){
-    btn.textContent='⏸ 停止';
-    playOrigin=-1; // resolved on first rAF frame
+    btn.textContent='⏸ 停止';playOrigin=-1;
     rafId=requestAnimationFrame(playLoop);
-  } else {
-    // pauseTime already kept current by playLoop each frame
-    cancelAnimationFrame(rafId);
-    btn.textContent='▶ 再生';
-  }
+  }else{cancelAnimationFrame(rafId);btn.textContent='▶ 再生';}
 }
-
 function playLoop(ts){
-  if(playOrigin===-1) playOrigin = ts/1000 - pauseTime;
-  const t = ts/1000 - playOrigin;
-  pauseTime = t; // keep updated so pause captures exact position
-  if(t >= totalDur){
-    renderFrame(totalDur);
-    isPlaying=false;
-    pauseTime=totalDur;
-    document.getElementById('playBtn').textContent='▶ 再生';
-    return;
-  }
+  if(playOrigin===-1) playOrigin=ts/1000-pauseTime;
+  const t=ts/1000-playOrigin;
+  pauseTime=t;
+  if(t>=totalDur){renderFrame(totalDur);isPlaying=false;pauseTime=totalDur;document.getElementById('playBtn').textContent='▶ 再生';return;}
   renderFrame(t);
-  if(isPlaying) rafId=requestAnimationFrame(playLoop);
+  if(isPlaying)rafId=requestAnimationFrame(playLoop);
 }
-
 function resetPlay(){
   cancelAnimationFrame(rafId);
-  isPlaying=false; pauseTime=0; playOrigin=0;
+  isPlaying=false;pauseTime=0;playOrigin=-1;
   document.getElementById('playBtn').textContent='▶ 再生';
-  if(layerCtx){ layerCtx.clearRect(0,0,layerCvs.width,layerCvs.height); committed=0; }
-  if(worldCtx){ worldCtx.clearRect(0,0,worldCvs.width,worldCvs.height); }
-  zoomScale=1.0; zoomLastT=0;
-  if(sequence.length) renderFrame(0);
+  if(layerCtx){layerCtx.clearRect(0,0,layerCvs.width,layerCvs.height);committed=0;}
+  accumCvs=null;accumCtx=null;zoomLastT=0;
+  if(sequence.length)renderFrame(0);
 }
 
 // ══════════════════════════════════════════════════════
-// LIVE MODE — absolute time, no dt accumulation
+// LIVE MODE
 // ══════════════════════════════════════════════════════
 function setMode(m){
   mode=m;
@@ -827,107 +681,92 @@ function setMode(m){
   document.getElementById('modeLive').className  ='mode-btn'+(m==='live'?' live-active':'');
   document.getElementById('manualControls').style.display=m==='manual'?'':'none';
   document.getElementById('liveControls').style.display  =m==='live'?'':'none';
-  if(m==='manual'&&liveActive) stopLive();
+  if(m==='manual'&&liveActive)stopLive();
 }
-
-function toggleLive(){ liveActive?stopLive():startLive(); }
+function toggleLive(){liveActive?stopLive():startLive();}
 
 function startLive(){
-  if(!images.length) return;
-  liveActive=true; livePrevBeat=-1;
-  liveOrigin=-1; // will be set from first rAF ts
-  liveClips=[];
-
+  if(!images.length)return;
+  liveActive=true;livePrevBeat=-1;liveOrigin=-1;liveClips=[];
   const [W,H]=getOutputSize();
-  canvas.width=W; canvas.height=H; canvas.style.display='block';
+  canvas.width=W;canvas.height=H;canvas.style.display='block';
   document.getElementById('emptyState').style.display='none';
   document.getElementById('hud').style.display='';
   document.getElementById('hudLive').style.display='';
-
-  liveLayerCvs=document.createElement('canvas');
-  liveLayerCvs.width=W; liveLayerCvs.height=H;
+  liveLayerCvs=document.createElement('canvas');liveLayerCvs.width=W;liveLayerCvs.height=H;
   liveLayerCtx=liveLayerCvs.getContext('2d');
-  zoomScale=1.0; zoomLastT=0;
-
+  liveAccumCvs=null;liveAccumCtx=null;liveZoomLastT=0;
   document.getElementById('liveStartBtn').textContent='■ LIVE STOP';
   document.getElementById('liveStartBtn').className='btn btn-secondary';
-
   liveRafId=requestAnimationFrame(liveLoop);
 }
-
 function stopLive(){
-  liveActive=false;
-  cancelAnimationFrame(liveRafId);
+  liveActive=false;cancelAnimationFrame(liveRafId);
   document.getElementById('liveStartBtn').textContent='⬡ LIVE START';
   document.getElementById('liveStartBtn').className='btn btn-danger';
   document.getElementById('hudLive').style.display='none';
 }
 
 function liveLoop(ts){
-  if(!liveActive) return;
-  // Set origin from the first rAF timestamp — eliminates startLive→rAF scheduling lag
-  if(liveOrigin===-1) liveOrigin=ts/1000;
-  const elapsed = ts/1000 - liveOrigin;
-  const bpm     = getBpm();
-  const beatDur = 60/bpm;
-  const beats   = getBeats();
-  const refresh = parseInt(document.getElementById('refreshRate').value);
-  const [W,H]   = getOutputSize();
+  if(!liveActive)return;
+  if(liveOrigin===-1)liveOrigin=ts/1000;
+  const elapsed=ts/1000-liveOrigin;
+  const bpm=getBpm(),beatDur=60/bpm,beats=getBeats();
+  const refresh=parseInt(document.getElementById('refreshRate').value);
+  const [W,H]=getOutputSize();
+  const rate=getZoomRate();
 
-  // Spawn clip on beat boundary
-  const currentBeat = Math.floor(elapsed/beatDur);
-  if(currentBeat !== livePrevBeat && currentBeat%refresh===0){
+  // Beat detection & clip spawn
+  const currentBeat=Math.floor(elapsed/beatDur);
+  if(currentBeat!==livePrevBeat&&currentBeat%refresh===0){
     livePrevBeat=currentBeat;
     const pool=images.length>0?images:[];
-    if(pool.length) liveClips.push(makeClip(currentBeat*beatDur,pool,W,H));
+    if(pool.length)liveClips.push(makeClip(currentBeat*beatDur,pool,W,H));
   }
 
-  // ── ズーム更新
-  const lrate=getZoomRate();
-  const ldt=elapsed-zoomLastT;
-  if(ldt>0) zoomScale*=Math.pow(1+lrate,ldt);
-  zoomLastT=elapsed;
-
-  // Bake finished clips into liveLayerCvs (world space)
-  let pruneNeeded=false;
+  // Bake finished clips into liveLayerCvs
   liveClips=liveClips.filter(c=>{
-    if(elapsed > c.startTime+c.duration){
-      renderClip(liveLayerCtx,c,1);
-      pruneNeeded=true;
-      return false;
-    }
+    if(elapsed>c.startTime+c.duration){renderClip(liveLayerCtx,c,1);return false;}
     return true;
   });
-  if(pruneNeeded) pruneWorld_live(W,H);
 
-  // ── 描画: zoom変換の中にworld+進行中クリップ
+  // accumCvs 初期化
+  if(!liveAccumCvs||liveAccumCvs.width!==W||liveAccumCvs.height!==H){
+    liveAccumCvs=document.createElement('canvas');liveAccumCvs.width=W;liveAccumCvs.height=H;
+    liveAccumCtx=liveAccumCvs.getContext('2d');
+    drawBackground(liveAccumCtx,W,H);
+  }
+  const ldt=Math.max(0,elapsed-liveZoomLastT);
+  liveZoomLastT=elapsed;
+
+  // 描画: 背景 → 前フレームをズーム → baked layer → アクティブclip → テキスト
   ctx.clearRect(0,0,W,H);
   drawBackground(ctx,W,H);
-  const lcx=W/2, lcy=H/2;
-  ctx.save();
-  ctx.translate(lcx,lcy);
-  ctx.scale(zoomScale,zoomScale);
-  ctx.translate(-lcx,-lcy);
+  applyAccumZoom(ctx,liveAccumCvs,W,H,ldt,rate);
   ctx.drawImage(liveLayerCvs,0,0);
   liveClips.forEach(c=>{
     const lt=Math.min(1,(elapsed-c.startTime)/c.duration);
-    if(lt>=0) renderClip(ctx,c,lt);
+    if(lt>=0)renderClip(ctx,c,lt);
   });
-  ctx.restore();
   drawCenterText(ctx,W,H,elapsed);
-
   updateHudBeat(elapsed);
-  if(liveActive) liveRafId=requestAnimationFrame(liveLoop);
+
+  // 今のフレームをliveAccumCvsへ保存
+  liveAccumCtx.clearRect(0,0,W,H);
+  liveAccumCtx.drawImage(canvas,0,0);
+
+  if(liveActive)liveRafId=requestAnimationFrame(liveLoop);
 }
 
 // ══════════════════════════════════════════════════════
-// Export — pure frame-by-frame, no real-time wait
+// Export
 // ══════════════════════════════════════════════════════
 async function startExport(){
-  if(!sequence.length) return;
+  if(!sequence.length)return;
   const fps=parseInt(document.getElementById('exportFps').value);
   const [W,H]=getOutputSize();
   const totalFrames=Math.ceil(totalDur*fps);
+  const rate=getZoomRate();
 
   const ov=document.getElementById('progOverlay');
   const bar=document.getElementById('progFill');
@@ -935,106 +774,78 @@ async function startExport(){
   const frm=document.getElementById('progFrame');
   ov.classList.add('show');
 
-  // Separate offscreen canvases — never touch the live preview
-  const off=document.createElement('canvas'); off.width=W; off.height=H;
+  const off=document.createElement('canvas');off.width=W;off.height=H;
   const oc=off.getContext('2d');
-  const exWorld=document.createElement('canvas'); exWorld.width=W; exWorld.height=H;
-  const ewc=exWorld.getContext('2d');
+  const exLayer=document.createElement('canvas');exLayer.width=W;exLayer.height=H;
+  const elc=exLayer.getContext('2d');
   let exCommitted=0;
-  let exZoom=1.0, exZoomLastT=0;
-  const exRate=getZoomRate();
 
-  // Collect all PNG blobs first (pure CPU, no timing dependency)
+  // export用accumCvs（黒で初期化）
+  const exAccum=document.createElement('canvas');exAccum.width=W;exAccum.height=H;
+  const eac=exAccum.getContext('2d');
+  drawBackground(eac,W,H);
+  let exZoomLastT=0;
+
   lbl.textContent='フレームをレンダリング中...';
   const blobs=[];
   for(let f=0;f<totalFrames;f++){
     const t=f/fps;
-
-    // zoom update for export
-    const exDt=t-exZoomLastT;
-    if(exDt>0){ exZoom*=Math.pow(1+exRate,exDt); }
+    const exDt=Math.max(0,t-exZoomLastT);
     exZoomLastT=t;
 
-    // bake ended clips into exWorld
-    while(exCommitted<sequence.length &&
-          sequence[exCommitted].startTime+sequence[exCommitted].duration < t){
-      renderClip(ewc,sequence[exCommitted],1);
-      exCommitted++;
+    // bake ended clips
+    while(exCommitted<sequence.length&&sequence[exCommitted].startTime+sequence[exCommitted].duration<t){
+      renderClip(elc,sequence[exCommitted],1);exCommitted++;
     }
 
     oc.clearRect(0,0,W,H);
     drawBackground(oc,W,H);
-    const ecx=W/2,ecy=H/2;
-    oc.save();
-    oc.translate(ecx,ecy); oc.scale(exZoom,exZoom); oc.translate(-ecx,-ecy);
-    oc.drawImage(exWorld,0,0);
+    applyAccumZoom(oc,exAccum,W,H,exDt,rate);
+    oc.drawImage(exLayer,0,0);
     for(let i=exCommitted;i<sequence.length;i++){
       const clip=sequence[i];
-      if(clip.startTime>t) break;
+      if(clip.startTime>t)break;
       renderClip(oc,clip,Math.min(1,(t-clip.startTime)/clip.duration));
     }
-    oc.restore();
     drawCenterText(oc,W,H,t);
 
-    // toBlob is async but we await each one — deterministic ordering
+    // 今のフレームをexAccumに保存
+    eac.clearRect(0,0,W,H);eac.drawImage(off,0,0);
+
     const blob=await new Promise(res=>off.toBlob(res,'image/png'));
     blobs.push(blob);
-
     bar.style.width=((f+1)/totalFrames*60)+'%';
     frm.textContent=`${f+1} / ${totalFrames} frames`;
-
-    // yield to prevent UI freeze every 10 frames
-    if(f%10===9) await new Promise(r=>setTimeout(r,0));
+    if(f%10===9)await new Promise(r=>setTimeout(r,0));
   }
 
-  // Encode via MediaRecorder: manual frame stepping (captureStream(0)) —
-  // each frame is pushed explicitly via requestFrame(), so encoding speed
-  // is decoupled from real wall-clock time. This avoids the drift/lag that
-  // happens when decode+draw time eats into the real-time frame budget.
   lbl.textContent='エンコード中...';
-  const sc=document.createElement('canvas'); sc.width=W; sc.height=H;
+  const sc=document.createElement('canvas');sc.width=W;sc.height=H;
   const sctx=sc.getContext('2d');
   const chunks=[];
   const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
-  const stream=sc.captureStream(0); // 0 = manual mode, no auto-driven fps
+  const stream=sc.captureStream(0);
   const track=stream.getVideoTracks()[0];
   const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:16_000_000});
-  rec.ondataavailable=e=>{if(e.data.size>0) chunks.push(e.data);};
-
+  rec.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
   const recStopped=new Promise(res=>rec.onstop=res);
   rec.start();
-
   const frameDelay=1000/fps;
   const encodeStart=performance.now();
   for(let i=0;i<blobs.length;i++){
     const bmp=await createImageBitmap(blobs[i]);
-    sctx.clearRect(0,0,W,H);
-    sctx.drawImage(bmp,0,0);
-    bmp.close();
-    if(typeof track.requestFrame==='function') track.requestFrame();
+    sctx.clearRect(0,0,W,H);sctx.drawImage(bmp,0,0);bmp.close();
+    if(typeof track.requestFrame==='function')track.requestFrame();
     bar.style.width=(60+(i+1)/blobs.length*38)+'%';
-
-    // Absolute-time pacing (no drift accumulation): wait until the exact
-    // wall-clock moment frame i+1 is due, accounting for time already
-    // spent decoding/drawing this frame. Fixes the lag/stutter caused by
-    // the old fixed per-iteration delay, which let real elapsed time creep
-    // past the target fps interval.
-    const targetElapsed=(i+1)*frameDelay;
-    const actualElapsed=performance.now()-encodeStart;
-    const wait=targetElapsed-actualElapsed;
-    if(wait>0) await new Promise(r=>setTimeout(r,wait));
+    const wait=(i+1)*frameDelay-(performance.now()-encodeStart);
+    if(wait>0)await new Promise(r=>setTimeout(r,wait));
   }
-
-  rec.stop();
-  lbl.textContent='パッケージング中...';
-  await recStopped;
-
+  rec.stop();lbl.textContent='パッケージング中...';await recStopped;
   const blob2=new Blob(chunks,{type:'video/webm'});
   const url=URL.createObjectURL(blob2);
-  const a=document.createElement('a'); a.href=url; a.download=`pixelsplit-${Date.now()}.webm`; a.click();
+  const a=document.createElement('a');a.href=url;a.download=`pixelsplit-${Date.now()}.webm`;a.click();
   setTimeout(()=>URL.revokeObjectURL(url),3000);
-  bar.style.width='100%';
-  ov.classList.remove('show');
+  bar.style.width='100%';ov.classList.remove('show');
 }
 
 // ══════════════════════════════════════════════════════
@@ -1042,7 +853,7 @@ async function startExport(){
 // ══════════════════════════════════════════════════════
 function toggleFullscreen(){
   const el=document.getElementById('previewArea');
-  if(!document.fullscreenElement) el.requestFullscreen().catch(()=>{});
+  if(!document.fullscreenElement)el.requestFullscreen().catch(()=>{});
   else document.exitFullscreen();
 }
 </script>
