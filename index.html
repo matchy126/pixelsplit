@@ -222,6 +222,17 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM Mon
   </div>
   <div class="divider"></div>
 
+  <!-- Zoom -->
+  <div>
+    <div class="slabel">ズーム</div>
+    <div class="prow">
+      <div class="phdr"><span class="pname">ズーム速度</span><span class="pval" id="zoomRateVal">5%/s</span></div>
+      <input type="range" id="zoomRate" min="0" max="30" value="5"
+        oninput="document.getElementById('zoomRateVal').textContent=this.value+'%/s'">
+    </div>
+  </div>
+  <div class="divider"></div>
+
   <!-- Mode -->
   <div>
     <div class="slabel">モード</div>
@@ -314,6 +325,11 @@ let rafId       = null;
 // Layer accumulation
 let layerCvs = null, layerCtx = null;
 let committed = 0;
+
+// Zoom state
+let zoomAccum = 1.0;       // accumulated zoom scale (>= 1)
+let zoomLastT = 0;         // last t at which zoom was updated (live: elapsed, manual: t)
+let zoomTrimCounter = 0;   // how many clips baked since last trim
 
 // Live mode
 let liveActive  = false;
@@ -417,6 +433,8 @@ function drawBackground(c,W,H){
     c.fillStyle='#08080a'; c.fillRect(0,0,W,H);
   }
 }
+
+function getZoomRate(){ return (parseInt(document.getElementById('zoomRate').value)||0)/100; }
 
 function updateHudBeat(t){
   const beatDur=60/getBpm();
@@ -563,65 +581,74 @@ function renderClip(destCtx, clip, t){
   const srcW=img.width, srcH=img.height;
   const spx=splitPos/100;
 
-  // ── Build split frame onto tmp ──
-  let tmp, placeDx, placeDy;
-
   if(direction==='v'){
-    const splitX=Math.round(drawW*spx);
-    const lSrcW =Math.round(srcW*spx);
-    const rSrcW =srcW-lSrcW;
-    const rDstW =drawW-splitX;
+    const splitX = Math.round(drawW*spx);
+    const lSrcW  = Math.round(srcW*spx);
+    const rSrcW  = srcW-lSrcW;
+    const rDstW  = drawW-splitX;
 
-    tmp=document.createElement('canvas');
+    // tmp is always wide enough for both halves + the gap
+    const tmp=document.createElement('canvas');
     tmp.width=drawW+gap; tmp.height=drawH;
     const tc=tmp.getContext('2d');
 
-    // Both sides: left at x=0, right at splitX+gap, stretch in between
-    tc.drawImage(img,0,    0,lSrcW,srcH, 0,          0,splitX, drawH);
-    tc.drawImage(img,lSrcW,0,rSrcW,srcH, splitX+gap, 0,rDstW,  drawH);
-    if(gap>0){
-      const sx=Math.min(srcW-1,lSrcW);
-      tc.drawImage(img,sx,0,1,srcH, splitX,0,gap,drawH);
+    if(movingSide===0){
+      // LEFT moves left → we shift entire content RIGHT by gap inside tmp,
+      // then place tmp at dx-gap so net effect is left side moves left.
+      // Inside tmp:  left at x=gap-gap=0..splitX, right at x=splitX+gap
+      // Wait — simpler: draw left at x=0, right at splitX+gap, stretch between.
+      // Place tmp at destCtx (dx - gap, dy).
+      tc.drawImage(img, 0,    0,lSrcW,srcH,  0,          0, splitX,  drawH); // left block at 0
+      tc.drawImage(img, lSrcW,0,rSrcW,srcH,  splitX+gap, 0, rDstW,   drawH); // right block shifted right
+      if(gap>0){
+        const sx=Math.min(srcW-1,lSrcW); // rightmost col of left half
+        tc.drawImage(img, sx,0,1,srcH,   splitX,     0, gap,     drawH); // stretch fills gap
+      }
+      destCtx.drawImage(tmp, dx-gap, dy);
+    } else {
+      // RIGHT moves right → left stays, right + stretch extend to the right.
+      // Place tmp at dx (extra width on right side is fine).
+      tc.drawImage(img, 0,    0,lSrcW,srcH,  0,          0, splitX,  drawH); // left fixed
+      tc.drawImage(img, lSrcW,0,rSrcW,srcH,  splitX+gap, 0, rDstW,   drawH); // right shifted right
+      if(gap>0){
+        const sx=Math.min(srcW-1,lSrcW);
+        tc.drawImage(img, sx,0,1,srcH,       splitX,     0, gap,     drawH); // stretch
+      }
+      destCtx.drawImage(tmp, dx, dy);
     }
-    // movingSide=0: left moved left → place tmp gap px to the left
-    placeDx = (movingSide===0) ? dx-gap : dx;
-    placeDy = dy;
-
   } else {
-    const splitY=Math.round(drawH*spx);
-    const tSrcH =Math.round(srcH*spx);
-    const bSrcH =srcH-tSrcH;
-    const bDstH =drawH-splitY;
+    // Horizontal split
+    const splitY = Math.round(drawH*spx);
+    const tSrcH  = Math.round(srcH*spx);
+    const bSrcH  = srcH-tSrcH;
+    const bDstH  = drawH-splitY;
 
-    tmp=document.createElement('canvas');
+    const tmp=document.createElement('canvas');
     tmp.width=drawW; tmp.height=drawH+gap;
     const tc=tmp.getContext('2d');
 
-    tc.drawImage(img,0,0,    srcW,tSrcH, 0,0,         drawW,splitY);
-    tc.drawImage(img,0,tSrcH,srcW,bSrcH, 0,splitY+gap,drawW,bDstH);
-    if(gap>0){
-      const sy=Math.min(srcH-1,tSrcH);
-      tc.drawImage(img,0,sy,srcW,1, 0,splitY,drawW,gap);
+    if(movingSide===0){
+      // TOP moves up → draw top at y=0, bottom at splitY+gap, stretch between.
+      // Place tmp at (dx, dy-gap).
+      tc.drawImage(img, 0,0,    srcW,tSrcH,  0, 0,          drawW, splitY); // top at 0
+      tc.drawImage(img, 0,tSrcH,srcW,bSrcH,  0, splitY+gap, drawW, bDstH); // bottom shifted down
+      if(gap>0){
+        const sy=Math.min(srcH-1,tSrcH);
+        tc.drawImage(img, 0,sy,srcW,1,        0, splitY,     drawW, gap);   // stretch
+      }
+      destCtx.drawImage(tmp, dx, dy-gap);
+    } else {
+      // BOTTOM moves down → top stays, bottom + stretch extend downward.
+      // Place tmp at (dx, dy).
+      tc.drawImage(img, 0,0,    srcW,tSrcH,  0, 0,          drawW, splitY); // top fixed
+      tc.drawImage(img, 0,tSrcH,srcW,bSrcH,  0, splitY+gap, drawW, bDstH); // bottom shifted
+      if(gap>0){
+        const sy=Math.min(srcH-1,tSrcH);
+        tc.drawImage(img, 0,sy,srcW,1,        0, splitY,     drawW, gap);   // stretch
+      }
+      destCtx.drawImage(tmp, dx, dy);
     }
-    placeDx = dx;
-    // movingSide=0: top moved up → place tmp gap px upward
-    placeDy = (movingSide===0) ? dy-gap : dy;
   }
-
-  // ── Zoom: scale from zoomStart→1.0 centered on image center ──
-  // t=0 → zoomStart (small), t=1 → 1.0 (full size)
-  const zoomStart = 0.55;
-  const scale = zoomStart + (1 - zoomStart) * t; // linear zoom in
-
-  // Center of the (placed) tmp on destCtx
-  const cx = placeDx + tmp.width  / 2;
-  const cy = placeDy + tmp.height / 2;
-
-  destCtx.save();
-  destCtx.translate(cx, cy);
-  destCtx.scale(scale, scale);
-  destCtx.drawImage(tmp, -tmp.width/2, -tmp.height/2);
-  destCtx.restore();
 }
 
 // ══════════════════════════════════════════════════════
@@ -632,10 +659,41 @@ function initLayer(W,H){
   layerCvs.width=W; layerCvs.height=H;
   layerCtx=layerCvs.getContext('2d');
   committed=0;
+  zoomAccum=1.0; zoomLastT=0; zoomTrimCounter=0;
 }
 function buildLayerUpTo(idx){
-  for(let i=committed;i<idx;i++) renderClip(layerCtx,sequence[i],1);
+  for(let i=committed;i<idx;i++){
+    renderClip(layerCtx,sequence[i],1);
+    zoomTrimCounter++;
+    // Every 16 clips, trim off-screen regions by re-compositing with current zoom
+    if(zoomTrimCounter>=16){
+      trimLayer();
+      zoomTrimCounter=0;
+    }
+  }
   committed=Math.max(committed,idx);
+}
+
+// Trim: flatten layerCvs at current zoom so off-screen pixels are discarded.
+// This keeps the layer canvas lean as zoom grows.
+function trimLayer(){
+  if(!layerCvs||zoomAccum<=1.001) return;
+  const W=layerCvs.width, H=layerCvs.height;
+  const tmp=document.createElement('canvas');
+  tmp.width=W; tmp.height=H;
+  const tc=tmp.getContext('2d');
+  // Draw the current layer at the current zoom into tmp (same transform as renderFrame)
+  const cx=W/2, cy=H/2;
+  tc.save();
+  tc.translate(cx,cy);
+  tc.scale(zoomAccum,zoomAccum);
+  tc.translate(-cx,-cy);
+  tc.drawImage(layerCvs,0,0);
+  tc.restore();
+  // Replace layerCvs content with the zoomed version, then reset zoomAccum
+  layerCtx.clearRect(0,0,W,H);
+  layerCtx.drawImage(tmp,0,0);
+  zoomAccum=1.0; // zoom is now baked in
 }
 
 // ══════════════════════════════════════════════════════
@@ -645,6 +703,14 @@ function renderFrame(t){
   if(!sequence.length) return;
   const W=canvas.width, H=canvas.height;
 
+  // Update zoom accumulation from last rendered t
+  const rate = getZoomRate();
+  const dt   = Math.max(0, t - zoomLastT);
+  if(dt > 0){
+    zoomAccum *= Math.pow(1 + rate, dt);
+  }
+  zoomLastT = t;
+
   let firstActive=0;
   while(firstActive<sequence.length &&
         sequence[firstActive].startTime+sequence[firstActive].duration < t) firstActive++;
@@ -652,13 +718,21 @@ function renderFrame(t){
 
   ctx.clearRect(0,0,W,H);
   drawBackground(ctx,W,H);
-  ctx.drawImage(layerCvs,0,0);
 
+  // Apply continuous zoom toward canvas center
+  const cx=W/2, cy=H/2;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(zoomAccum, zoomAccum);
+  ctx.translate(-cx, -cy);
+  ctx.drawImage(layerCvs,0,0);
   for(let i=firstActive;i<sequence.length;i++){
     const clip=sequence[i];
     if(clip.startTime>t) break;
     renderClip(ctx,clip,Math.min(1,(t-clip.startTime)/clip.duration));
   }
+  ctx.restore();
+
   drawCenterText(ctx,W,H,t);
   updateHudBeat(t);
 }
@@ -729,6 +803,7 @@ function resetPlay(){
   isPlaying=false; pauseTime=0; playOrigin=0;
   document.getElementById('playBtn').textContent='▶ 再生';
   if(layerCtx){ layerCtx.clearRect(0,0,layerCvs.width,layerCvs.height); committed=0; }
+  zoomAccum=1.0; zoomLastT=0; zoomTrimCounter=0;
   if(sequence.length) renderFrame(0);
 }
 
@@ -761,6 +836,7 @@ function startLive(){
   liveLayerCvs=document.createElement('canvas');
   liveLayerCvs.width=W; liveLayerCvs.height=H;
   liveLayerCtx=liveLayerCvs.getContext('2d');
+  zoomAccum=1.0; zoomLastT=0; zoomTrimCounter=0;
 
   document.getElementById('liveStartBtn').textContent='■ LIVE STOP';
   document.getElementById('liveStartBtn').className='btn btn-secondary';
@@ -804,14 +880,40 @@ function liveLoop(ts){
     return true;
   });
 
-  // Composite
+  // Update zoom accumulation
+  const rate=getZoomRate();
+  const ldt=elapsed-zoomLastT;
+  if(ldt>0){ zoomAccum*=Math.pow(1+rate,ldt); }
+  zoomLastT=elapsed;
+
+  // Periodic trim of liveLayerCvs
+  zoomTrimCounter++;
+  if(zoomTrimCounter>=16){
+    // Trim liveLayerCvs
+    if(liveLayerCvs&&zoomAccum>1.001){
+      const tW=liveLayerCvs.width,tH=liveLayerCvs.height;
+      const tmp2=document.createElement('canvas'); tmp2.width=tW; tmp2.height=tH;
+      const tc2=tmp2.getContext('2d');
+      tc2.save(); tc2.translate(tW/2,tH/2); tc2.scale(zoomAccum,zoomAccum); tc2.translate(-tW/2,-tH/2);
+      tc2.drawImage(liveLayerCvs,0,0); tc2.restore();
+      liveLayerCtx.clearRect(0,0,tW,tH); liveLayerCtx.drawImage(tmp2,0,0);
+      zoomAccum=1.0;
+    }
+    zoomTrimCounter=0;
+  }
+
+  // Composite with zoom
   ctx.clearRect(0,0,W,H);
   drawBackground(ctx,W,H);
+  const lcx=W/2,lcy=H/2;
+  ctx.save();
+  ctx.translate(lcx,lcy); ctx.scale(zoomAccum,zoomAccum); ctx.translate(-lcx,-lcy);
   ctx.drawImage(liveLayerCvs,0,0);
   liveClips.forEach(c=>{
     const lt=Math.min(1,(elapsed-c.startTime)/c.duration);
     if(lt>=0) renderClip(ctx,c,lt);
   });
+  ctx.restore();
   drawCenterText(ctx,W,H,elapsed);
 
   updateHudBeat(elapsed);
@@ -839,6 +941,8 @@ async function startExport(){
   const exLayer=document.createElement('canvas'); exLayer.width=W; exLayer.height=H;
   const elc=exLayer.getContext('2d');
   let exCommitted=0;
+  let exZoom=1.0, exZoomLastT=0, exTrimCtr=0;
+  const exRate=getZoomRate();
 
   // Collect all PNG blobs first (pure CPU, no timing dependency)
   lbl.textContent='フレームをレンダリング中...';
@@ -853,15 +957,23 @@ async function startExport(){
       exCommitted++;
     }
 
+    // Update export zoom
+    const exDt=t-exZoomLastT;
+    if(exDt>0){ exZoom*=Math.pow(1+exRate,exDt); }
+    exZoomLastT=t;
+
     oc.clearRect(0,0,W,H);
     drawBackground(oc,W,H);
+    const ecx=W/2,ecy=H/2;
+    oc.save();
+    oc.translate(ecx,ecy); oc.scale(exZoom,exZoom); oc.translate(-ecx,-ecy);
     oc.drawImage(exLayer,0,0);
-
     for(let i=exCommitted;i<sequence.length;i++){
       const clip=sequence[i];
       if(clip.startTime>t) break;
       renderClip(oc,clip,Math.min(1,(t-clip.startTime)/clip.duration));
     }
+    oc.restore();
     drawCenterText(oc,W,H,t);
 
     // toBlob is async but we await each one — deterministic ordering
