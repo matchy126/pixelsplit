@@ -227,7 +227,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM Mon
     <div class="slabel">ズーム</div>
     <div class="prow">
       <div class="phdr"><span class="pname">ズーム速度</span><span class="pval" id="zoomRateVal">5%/s</span></div>
-      <input type="range" id="zoomRate" min="0" max="30" value="5"
+      <input type="range" id="zoomRate" min="0" max="50" value="5"
         oninput="document.getElementById('zoomRateVal').textContent=this.value+'%/s'">
     </div>
   </div>
@@ -326,10 +326,13 @@ let rafId       = null;
 let layerCvs = null, layerCtx = null;
 let committed = 0;
 
-// Zoom state
-let zoomAccum = 1.0;       // accumulated zoom scale (>= 1)
-let zoomLastT = 0;         // last t at which zoom was updated (live: elapsed, manual: t)
-let zoomTrimCounter = 0;   // how many clips baked since last trim
+// Global zoom state
+// worldCvs: クリップをズームなしで蓄積するバッファ（出力解像度と同サイズ）
+// zoomScale: 現在の倍率（1.0から増え続ける）
+// zoomLastT: 前フレームのt
+let worldCvs = null, worldCtx = null;
+let zoomScale = 1.0;
+let zoomLastT = 0;
 
 // Live mode
 let liveActive  = false;
@@ -435,6 +438,36 @@ function drawBackground(c,W,H){
 }
 
 function getZoomRate(){ return (parseInt(document.getElementById('zoomRate').value)||0)/100; }
+
+// worldCvs に不要なピクセル（画面外）を削除する
+// 現在のzoomScaleで、worldの点(wx,wy)は画面上の (cx+(wx-cx)*zoom, cy+(wy-cy)*zoom) に投影される。
+// zoom>=1なので、世界座標で |wx-cx| > W/(2*zoom) の列は画面外 → clearRect で消せる
+function pruneWorld_live(W,H){
+  if(!liveLayerCtx||zoomScale<=1.0) return;
+  const cx=W/2,cy=H/2;
+  const hw=W/(2*zoomScale), hh=H/(2*zoomScale);
+  const x0=Math.floor(cx-hw),y0=Math.floor(cy-hh);
+  const x1=Math.ceil(cx+hw), y1=Math.ceil(cy+hh);
+  if(x0>0) liveLayerCtx.clearRect(0,0,x0,H);
+  if(x1<W) liveLayerCtx.clearRect(x1,0,W-x1,H);
+  if(y0>0) liveLayerCtx.clearRect(0,0,W,y0);
+  if(y1<H) liveLayerCtx.clearRect(0,y1,W,H-y1);
+}
+
+function pruneWorld(W, H){
+  if(!worldCtx || zoomScale <= 1.0) return;
+  const cx=W/2, cy=H/2;
+  // visible world rect (in world coords)
+  const hw = W/(2*zoomScale);  // half-width in world space that maps to screen edge
+  const hh = H/(2*zoomScale);
+  const x0=Math.floor(cx-hw), y0=Math.floor(cy-hh);
+  const x1=Math.ceil(cx+hw),  y1=Math.ceil(cy+hh);
+  // clear outside strips
+  if(x0>0)  worldCtx.clearRect(0,   0, x0,    H);
+  if(x1<W)  worldCtx.clearRect(x1,  0, W-x1,  H);
+  if(y0>0)  worldCtx.clearRect(0,   0, W,      y0);
+  if(y1<H)  worldCtx.clearRect(0,  y1, W,      H-y1);
+}
 
 function updateHudBeat(t){
   const beatDur=60/getBpm();
@@ -659,41 +692,18 @@ function initLayer(W,H){
   layerCvs.width=W; layerCvs.height=H;
   layerCtx=layerCvs.getContext('2d');
   committed=0;
-  zoomAccum=1.0; zoomLastT=0; zoomTrimCounter=0;
+  // worldCvs: クリップ蓄積バッファ（ズームなし）
+  worldCvs=document.createElement('canvas');
+  worldCvs.width=W; worldCvs.height=H;
+  worldCtx=worldCvs.getContext('2d');
+  zoomScale=1.0; zoomLastT=0;
 }
-function buildLayerUpTo(idx){
+function buildLayerUpTo(idx, W, H){
   for(let i=committed;i<idx;i++){
-    renderClip(layerCtx,sequence[i],1);
-    zoomTrimCounter++;
-    // Every 16 clips, trim off-screen regions by re-compositing with current zoom
-    if(zoomTrimCounter>=16){
-      trimLayer();
-      zoomTrimCounter=0;
-    }
+    renderClip(worldCtx,sequence[i],1);   // ← worldCtx に焼き込む
+    if((i+1)%16===0) pruneWorld(W,H);     // 16枚ごとに画面外を削除
   }
   committed=Math.max(committed,idx);
-}
-
-// Trim: flatten layerCvs at current zoom so off-screen pixels are discarded.
-// This keeps the layer canvas lean as zoom grows.
-function trimLayer(){
-  if(!layerCvs||zoomAccum<=1.001) return;
-  const W=layerCvs.width, H=layerCvs.height;
-  const tmp=document.createElement('canvas');
-  tmp.width=W; tmp.height=H;
-  const tc=tmp.getContext('2d');
-  // Draw the current layer at the current zoom into tmp (same transform as renderFrame)
-  const cx=W/2, cy=H/2;
-  tc.save();
-  tc.translate(cx,cy);
-  tc.scale(zoomAccum,zoomAccum);
-  tc.translate(-cx,-cy);
-  tc.drawImage(layerCvs,0,0);
-  tc.restore();
-  // Replace layerCvs content with the zoomed version, then reset zoomAccum
-  layerCtx.clearRect(0,0,W,H);
-  layerCtx.drawImage(tmp,0,0);
-  zoomAccum=1.0; // zoom is now baked in
 }
 
 // ══════════════════════════════════════════════════════
@@ -703,29 +713,29 @@ function renderFrame(t){
   if(!sequence.length) return;
   const W=canvas.width, H=canvas.height;
 
-  // Update zoom accumulation from last rendered t
+  // ── ズーム倍率を更新（指数的に増加）
   const rate = getZoomRate();
   const dt   = Math.max(0, t - zoomLastT);
-  if(dt > 0){
-    zoomAccum *= Math.pow(1 + rate, dt);
-  }
+  if(dt>0) zoomScale *= Math.pow(1+rate, dt);
   zoomLastT = t;
 
   let firstActive=0;
   while(firstActive<sequence.length &&
         sequence[firstActive].startTime+sequence[firstActive].duration < t) firstActive++;
-  buildLayerUpTo(firstActive);
+  buildLayerUpTo(firstActive, W, H);
 
+  // ── 描画: 背景 → グローバルzoom変換の中にworldと進行中クリップを描く → テキスト
   ctx.clearRect(0,0,W,H);
   drawBackground(ctx,W,H);
 
-  // Apply continuous zoom toward canvas center
   const cx=W/2, cy=H/2;
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.scale(zoomAccum, zoomAccum);
+  ctx.scale(zoomScale, zoomScale);
   ctx.translate(-cx, -cy);
-  ctx.drawImage(layerCvs,0,0);
+  // 蓄積済みworld（ズーム空間内）
+  ctx.drawImage(worldCvs,0,0);
+  // 進行中クリップ（ズーム空間内に通常サイズで描く → 画面上では拡大表示される）
   for(let i=firstActive;i<sequence.length;i++){
     const clip=sequence[i];
     if(clip.startTime>t) break;
@@ -803,7 +813,8 @@ function resetPlay(){
   isPlaying=false; pauseTime=0; playOrigin=0;
   document.getElementById('playBtn').textContent='▶ 再生';
   if(layerCtx){ layerCtx.clearRect(0,0,layerCvs.width,layerCvs.height); committed=0; }
-  zoomAccum=1.0; zoomLastT=0; zoomTrimCounter=0;
+  if(worldCtx){ worldCtx.clearRect(0,0,worldCvs.width,worldCvs.height); }
+  zoomScale=1.0; zoomLastT=0;
   if(sequence.length) renderFrame(0);
 }
 
@@ -836,7 +847,7 @@ function startLive(){
   liveLayerCvs=document.createElement('canvas');
   liveLayerCvs.width=W; liveLayerCvs.height=H;
   liveLayerCtx=liveLayerCvs.getContext('2d');
-  zoomAccum=1.0; zoomLastT=0; zoomTrimCounter=0;
+  zoomScale=1.0; zoomLastT=0;
 
   document.getElementById('liveStartBtn').textContent='■ LIVE STOP';
   document.getElementById('liveStartBtn').className='btn btn-secondary';
@@ -871,43 +882,32 @@ function liveLoop(ts){
     if(pool.length) liveClips.push(makeClip(currentBeat*beatDur,pool,W,H));
   }
 
-  // Bake finished clips
+  // ── ズーム更新
+  const lrate=getZoomRate();
+  const ldt=elapsed-zoomLastT;
+  if(ldt>0) zoomScale*=Math.pow(1+lrate,ldt);
+  zoomLastT=elapsed;
+
+  // Bake finished clips into liveLayerCvs (world space)
+  let pruneNeeded=false;
   liveClips=liveClips.filter(c=>{
     if(elapsed > c.startTime+c.duration){
       renderClip(liveLayerCtx,c,1);
+      pruneNeeded=true;
       return false;
     }
     return true;
   });
+  if(pruneNeeded) pruneWorld_live(W,H);
 
-  // Update zoom accumulation
-  const rate=getZoomRate();
-  const ldt=elapsed-zoomLastT;
-  if(ldt>0){ zoomAccum*=Math.pow(1+rate,ldt); }
-  zoomLastT=elapsed;
-
-  // Periodic trim of liveLayerCvs
-  zoomTrimCounter++;
-  if(zoomTrimCounter>=16){
-    // Trim liveLayerCvs
-    if(liveLayerCvs&&zoomAccum>1.001){
-      const tW=liveLayerCvs.width,tH=liveLayerCvs.height;
-      const tmp2=document.createElement('canvas'); tmp2.width=tW; tmp2.height=tH;
-      const tc2=tmp2.getContext('2d');
-      tc2.save(); tc2.translate(tW/2,tH/2); tc2.scale(zoomAccum,zoomAccum); tc2.translate(-tW/2,-tH/2);
-      tc2.drawImage(liveLayerCvs,0,0); tc2.restore();
-      liveLayerCtx.clearRect(0,0,tW,tH); liveLayerCtx.drawImage(tmp2,0,0);
-      zoomAccum=1.0;
-    }
-    zoomTrimCounter=0;
-  }
-
-  // Composite with zoom
+  // ── 描画: zoom変換の中にworld+進行中クリップ
   ctx.clearRect(0,0,W,H);
   drawBackground(ctx,W,H);
-  const lcx=W/2,lcy=H/2;
+  const lcx=W/2, lcy=H/2;
   ctx.save();
-  ctx.translate(lcx,lcy); ctx.scale(zoomAccum,zoomAccum); ctx.translate(-lcx,-lcy);
+  ctx.translate(lcx,lcy);
+  ctx.scale(zoomScale,zoomScale);
+  ctx.translate(-lcx,-lcy);
   ctx.drawImage(liveLayerCvs,0,0);
   liveClips.forEach(c=>{
     const lt=Math.min(1,(elapsed-c.startTime)/c.duration);
@@ -938,10 +938,10 @@ async function startExport(){
   // Separate offscreen canvases — never touch the live preview
   const off=document.createElement('canvas'); off.width=W; off.height=H;
   const oc=off.getContext('2d');
-  const exLayer=document.createElement('canvas'); exLayer.width=W; exLayer.height=H;
-  const elc=exLayer.getContext('2d');
+  const exWorld=document.createElement('canvas'); exWorld.width=W; exWorld.height=H;
+  const ewc=exWorld.getContext('2d');
   let exCommitted=0;
-  let exZoom=1.0, exZoomLastT=0, exTrimCtr=0;
+  let exZoom=1.0, exZoomLastT=0;
   const exRate=getZoomRate();
 
   // Collect all PNG blobs first (pure CPU, no timing dependency)
@@ -950,24 +950,24 @@ async function startExport(){
   for(let f=0;f<totalFrames;f++){
     const t=f/fps;
 
-    // bake ended clips
-    while(exCommitted<sequence.length &&
-          sequence[exCommitted].startTime+sequence[exCommitted].duration < t){
-      renderClip(elc,sequence[exCommitted],1);
-      exCommitted++;
-    }
-
-    // Update export zoom
+    // zoom update for export
     const exDt=t-exZoomLastT;
     if(exDt>0){ exZoom*=Math.pow(1+exRate,exDt); }
     exZoomLastT=t;
+
+    // bake ended clips into exWorld
+    while(exCommitted<sequence.length &&
+          sequence[exCommitted].startTime+sequence[exCommitted].duration < t){
+      renderClip(ewc,sequence[exCommitted],1);
+      exCommitted++;
+    }
 
     oc.clearRect(0,0,W,H);
     drawBackground(oc,W,H);
     const ecx=W/2,ecy=H/2;
     oc.save();
     oc.translate(ecx,ecy); oc.scale(exZoom,exZoom); oc.translate(-ecx,-ecy);
-    oc.drawImage(exLayer,0,0);
+    oc.drawImage(exWorld,0,0);
     for(let i=exCommitted;i<sequence.length;i++){
       const clip=sequence[i];
       if(clip.startTime>t) break;
