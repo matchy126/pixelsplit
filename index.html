@@ -294,7 +294,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM Mon
 
 <script>
 // ══════════════════════════════════════════════════════
-// RNG (seeded)
+// RNG
 // ══════════════════════════════════════════════════════
 let _rng=0;
 function seedRng(s){_rng=s>>>0;}
@@ -311,31 +311,28 @@ function rngPick(arr){return arr[Math.floor(rng()*arr.length)];}
 // State
 // ══════════════════════════════════════════════════════
 let images=[], bgImage=null, sequence=[], totalDur=0, mode='manual';
-
-// Manual playback
 let isPlaying=false, playOrigin=-1, pauseTime=0, rafId=null;
 
-// Layer (clips baked here, never zoomed)
-let layerCvs=null, layerCtx=null, committed=0;
-
-// ── accumCvs: 前フレームのスクリーン画像を保持するバッファ
-// 毎フレーム: accumCvs をズームして描画 → 新clip追加 → 結果をaccumCvsに保存
-// これにより「画面全体が前フレームを拡大し続ける」フィードバックズームになる
+// ── accumCvs だけがすべての描画状態を持つ ──
+// ロジック:
+//   毎フレーム accumCvs を「中心に向かって s 倍」にズームして ctx へ描画
+//   その上にアクティブclipを等倍で重ねる
+//   clipが終了したら t=1 の状態を accumCvs に直接焼き込む
+//   → layerCvs は不要。accumCvs がすべて。
 let accumCvs=null, accumCtx=null;
-let zoomLastT=0;
+let prevT=-1; // 前フレームの t（dt 計算用）
 
-// Live mode
+// Live
 let liveActive=false, liveOrigin=-1;
-let liveLayerCvs=null, liveLayerCtx=null;
 let liveAccumCvs=null, liveAccumCtx=null;
-let liveZoomLastT=0;
+let livePrevT=-1;
 let liveClips=[], livePrevBeat=-1, liveRafId=null;
 
 const canvas=document.getElementById('previewCanvas');
 const ctx=canvas.getContext('2d');
 
 // ══════════════════════════════════════════════════════
-// Background
+// Background / helpers
 // ══════════════════════════════════════════════════════
 function setupBgDrop(inputId,dropId){
   const input=document.getElementById(inputId);
@@ -358,34 +355,84 @@ function clearBg(){bgImage=null;document.getElementById('bgThumbWrap').innerHTML
 setupBgDrop('bgFileInput','bgDropZone');
 
 ['centerTextInput','centerFont','centerColor','centerAlign'].forEach(id=>{
-  document.getElementById(id).addEventListener('input',()=>{if(sequence.length)renderFrame(pauseTime||0);});
+  const el=document.getElementById(id);
+  if(el) el.addEventListener('input',()=>{if(sequence.length||liveActive)renderFrame(pauseTime||0);});
 });
 
+function getOutputSize(){return document.getElementById('resSel').value.split('x').map(Number);}
+function getBpm(){return parseFloat(document.getElementById('bpmInput').value)||128;}
+function getBeats(){return parseInt(document.getElementById('timeSig').value);}
+function getZoomRate(){return(parseInt(document.getElementById('zoomRate').value)||0)/100;}
+
+function fillBg(c,W,H){
+  if(bgImage){
+    const r=Math.max(W/bgImage.width,H/bgImage.height);
+    const bw=bgImage.width*r,bh=bgImage.height*r;
+    c.drawImage(bgImage,(W-bw)/2,(H-bh)/2,bw,bh);
+  }else{c.fillStyle='#08080a';c.fillRect(0,0,W,H);}
+}
+
+function updateHudBeat(t){
+  const bd=60/getBpm(),bi=Math.floor(t/bd);
+  const bar=Math.floor(bi/getBeats())+1,beat=(bi%getBeats())+1;
+  document.getElementById('hudBeat').textContent=`${bar}:${beat}`;
+}
+
 // ══════════════════════════════════════════════════════
-// Clip images
+// Center text
+// ══════════════════════════════════════════════════════
+let centerFx='none';
+function setCenterFx(fx){
+  centerFx=fx;
+  ['None','Pulse','Glitch'].forEach(n=>{document.getElementById('centerFx'+n).className='mode-btn';});
+  document.getElementById('centerFx'+fx.charAt(0).toUpperCase()+fx.slice(1)).className='mode-btn active';
+}
+function drawCenterText(c,W,H,t){
+  const text=document.getElementById('centerTextInput').value;
+  if(!text)return;
+  const sizePct=parseInt(document.getElementById('centerSize').value);
+  const fontFam=document.getElementById('centerFont').value;
+  const color=document.getElementById('centerColor').value;
+  const align=document.getElementById('centerAlign').value;
+  const strokeW=parseInt(document.getElementById('centerStroke').value);
+  let fontSize=Math.round(Math.min(W,H)*sizePct/100);
+  let cx=W/2,cy=H/2,ox=0,oy=0,glitchOffset=0;
+  const beatDur=60/getBpm(),beatPhase=(t%beatDur)/beatDur;
+  if(centerFx==='pulse'){const s=1+0.18*Math.sin(Math.PI*Math.min(1,beatPhase*2));fontSize=Math.round(fontSize*(beatPhase<0.5?s:1));}
+  else if(centerFx==='glitch'){if(beatPhase<0.12){glitchOffset=(rngLikeJitter(t)-0.5)*fontSize*0.25;ox=glitchOffset;}}
+  if(align==='top')cy=fontSize*0.9;
+  else if(align==='bottom')cy=H-fontSize*0.6;
+  c.save();
+  c.font=`800 ${fontSize}px ${fontFam}`;c.textAlign='center';c.textBaseline='middle';c.lineJoin='round';
+  if(centerFx==='glitch'&&glitchOffset!==0){
+    c.globalAlpha=0.6;c.fillStyle='#ff4060';c.fillText(text,cx+ox-2,cy+oy);
+    c.fillStyle='#47e8ff';c.fillText(text,cx+ox+2,cy+oy);c.globalAlpha=1;
+  }
+  if(strokeW>0){c.strokeStyle='#08080a';c.lineWidth=strokeW;c.strokeText(text,cx+ox,cy+oy);}
+  c.fillStyle=color;c.fillText(text,cx+ox,cy+oy);
+  c.restore();
+}
+function rngLikeJitter(t){const x=Math.sin(t*999.123)*43758.5453;return x-Math.floor(x);}
+
+// ══════════════════════════════════════════════════════
+// Images
 // ══════════════════════════════════════════════════════
 document.getElementById('fileInput').addEventListener('change',e=>loadFiles(Array.from(e.target.files)));
 const dz=document.getElementById('dropZone');
 dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');});
 dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
 dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');loadFiles(Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/')));});
-
 async function loadFiles(files){
   files=files.filter(f=>f.type.startsWith('image/'));
   if(!files.length)return;
   for(const f of files){
-    await new Promise(res=>{
-      const img=new Image(),url=URL.createObjectURL(f);
-      img.onload=()=>{images.push({name:f.name,img,url});res();};
-      img.onerror=res;img.src=url;
-    });
+    await new Promise(res=>{const img=new Image(),url=URL.createObjectURL(f);img.onload=()=>{images.push({name:f.name,img,url});res();};img.onerror=res;img.src=url;});
   }
   updateImgList();checkReady();
 }
 function updateImgList(){
   document.getElementById('imgCount').textContent=images.length;
-  const list=document.getElementById('imgList');
-  list.innerHTML='';
+  const list=document.getElementById('imgList');list.innerHTML='';
   images.forEach((item,i)=>{
     const d=document.createElement('div');d.className='img-item';
     d.innerHTML=`<img class="thumb" src="${item.url}"><span class="fname">${item.name}</span><button class="rm" onclick="removeImg(${i})">✕</button>`;
@@ -400,86 +447,13 @@ function checkReady(){
 }
 
 // ══════════════════════════════════════════════════════
-// Helpers
-// ══════════════════════════════════════════════════════
-function getOutputSize(){return document.getElementById('resSel').value.split('x').map(Number);}
-function getBpm(){return parseFloat(document.getElementById('bpmInput').value)||128;}
-function getBeats(){return parseInt(document.getElementById('timeSig').value);}
-function getZoomRate(){return(parseInt(document.getElementById('zoomRate').value)||0)/100;}
-
-function drawBackground(c,W,H){
-  if(bgImage){
-    const r=Math.max(W/bgImage.width,H/bgImage.height);
-    const bw=bgImage.width*r,bh=bgImage.height*r;
-    c.drawImage(bgImage,(W-bw)/2,(H-bh)/2,bw,bh);
-  }else{c.fillStyle='#08080a';c.fillRect(0,0,W,H);}
-}
-
-function updateHudBeat(t){
-  const beatDur=60/getBpm();
-  const bi=Math.floor(t/beatDur);
-  const bar=Math.floor(bi/getBeats())+1;
-  const beat=(bi%getBeats())+1;
-  document.getElementById('hudBeat').textContent=`${bar}:${beat}`;
-}
-
-// ══════════════════════════════════════════════════════
-// Center text overlay
-// ══════════════════════════════════════════════════════
-let centerFx='none';
-function setCenterFx(fx){
-  centerFx=fx;
-  ['centerFxNone','centerFxPulse','centerFxGlitch'].forEach(id=>{document.getElementById(id).className='mode-btn';});
-  document.getElementById('centerFx'+fx.charAt(0).toUpperCase()+fx.slice(1)).className='mode-btn active';
-  if(sequence.length)renderFrame(pauseTime||0);
-}
-function drawCenterText(c,W,H,t){
-  const text=document.getElementById('centerTextInput').value;
-  if(!text)return;
-  const sizePct=parseInt(document.getElementById('centerSize').value);
-  const fontFam=document.getElementById('centerFont').value;
-  const color=document.getElementById('centerColor').value;
-  const align=document.getElementById('centerAlign').value;
-  const strokeW=parseInt(document.getElementById('centerStroke').value);
-  let fontSize=Math.round(Math.min(W,H)*sizePct/100);
-  let cx=W/2,cy=H/2,ox=0,oy=0,glitchOffset=0;
-  const beatDur=60/getBpm();
-  const beatPhase=(t%beatDur)/beatDur;
-  if(centerFx==='pulse'){
-    const s=1+0.18*Math.sin(Math.PI*Math.min(1,beatPhase*2));
-    fontSize=Math.round(fontSize*(beatPhase<0.5?s:1));
-  }else if(centerFx==='glitch'){
-    if(beatPhase<0.12){glitchOffset=(rngLikeJitter(t)-0.5)*fontSize*0.25;ox=glitchOffset;}
-  }
-  if(align==='top')cy=fontSize*0.9;
-  else if(align==='bottom')cy=H-fontSize*0.6;
-  c.save();
-  c.font=`800 ${fontSize}px ${fontFam}`;
-  c.textAlign='center';c.textBaseline='middle';c.lineJoin='round';
-  if(centerFx==='glitch'&&glitchOffset!==0){
-    c.globalAlpha=0.6;
-    c.fillStyle='#ff4060';c.fillText(text,cx+ox-2,cy+oy);
-    c.fillStyle='#47e8ff';c.fillText(text,cx+ox+2,cy+oy);
-    c.globalAlpha=1;
-  }
-  if(strokeW>0){c.strokeStyle='#08080a';c.lineWidth=strokeW;c.strokeText(text,cx+ox,cy+oy);}
-  c.fillStyle=color;c.fillText(text,cx+ox,cy+oy);
-  c.restore();
-}
-function rngLikeJitter(t){const x=Math.sin(t*999.123)*43758.5453;return x-Math.floor(x);}
-
-// ══════════════════════════════════════════════════════
 // Clip factory
 // ══════════════════════════════════════════════════════
 function makeClip(startTime,pool,outW,outH){
-  const imgItem=rngPick(pool);
-  const img=imgItem.img;
-  const direction=rng()<.5?'v':'h';
-  const movingSide=rng()<.5?0:1;
-  const posR=rng();
-  const splitPos=posR<.33?1:posR<.66?rngInt(40,60):99;
-  const shortSide=Math.min(outW,outH);
-  const scaleFactor=0.15+rng()*0.60;
+  const imgItem=rngPick(pool),img=imgItem.img;
+  const direction=rng()<.5?'v':'h',movingSide=rng()<.5?0:1;
+  const posR=rng(),splitPos=posR<.33?1:posR<.66?rngInt(40,60):99;
+  const shortSide=Math.min(outW,outH),scaleFactor=0.15+rng()*0.60;
   const aspect=img.width/img.height;
   let drawW,drawH;
   if(aspect>=1){drawW=Math.round(shortSide*scaleFactor);drawH=Math.round(drawW/aspect);}
@@ -487,8 +461,7 @@ function makeClip(startTime,pool,outW,outH){
   const drawDim=direction==='v'?drawW:drawH;
   const maxGap=Math.round(drawDim*(0.30+rng()*0.90));
   const cx=rngInt(0,outW),cy=rngInt(0,outH);
-  const dx=cx-Math.floor(drawW/2),dy=cy-Math.floor(drawH/2);
-  return{startTime,duration:0.3,imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx,dy};
+  return{startTime,duration:0.3,imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx:cx-Math.floor(drawW/2),dy:cy-Math.floor(drawH/2)};
 }
 
 // ══════════════════════════════════════════════════════
@@ -496,127 +469,112 @@ function makeClip(startTime,pool,outW,outH){
 // ══════════════════════════════════════════════════════
 function renderClip(destCtx,clip,t){
   const{imgItem,direction,movingSide,splitPos,maxGap,drawW,drawH,dx,dy}=clip;
-  const img=imgItem.img;
-  const gap=Math.round(t*maxGap);
-  const srcW=img.width,srcH=img.height;
-  const spx=splitPos/100;
-
+  const img=imgItem.img,gap=Math.round(t*maxGap);
+  const srcW=img.width,srcH=img.height,spx=splitPos/100;
   if(direction==='v'){
-    const splitX=Math.round(drawW*spx);
-    const lSrcW=Math.round(srcW*spx),rSrcW=srcW-lSrcW,rDstW=drawW-splitX;
-    const tmp=document.createElement('canvas');
-    tmp.width=drawW+gap;tmp.height=drawH;
+    const splitX=Math.round(drawW*spx),lSrcW=Math.round(srcW*spx),rSrcW=srcW-lSrcW,rDstW=drawW-splitX;
+    const tmp=document.createElement('canvas');tmp.width=drawW+gap;tmp.height=drawH;
     const tc=tmp.getContext('2d');
-    if(movingSide===0){
-      tc.drawImage(img,0,0,lSrcW,srcH,0,0,splitX,drawH);
-      tc.drawImage(img,lSrcW,0,rSrcW,srcH,splitX+gap,0,rDstW,drawH);
-      if(gap>0){const sx=Math.min(srcW-1,lSrcW);tc.drawImage(img,sx,0,1,srcH,splitX,0,gap,drawH);}
-      destCtx.drawImage(tmp,dx-gap,dy);
-    }else{
-      tc.drawImage(img,0,0,lSrcW,srcH,0,0,splitX,drawH);
-      tc.drawImage(img,lSrcW,0,rSrcW,srcH,splitX+gap,0,rDstW,drawH);
-      if(gap>0){const sx=Math.min(srcW-1,lSrcW);tc.drawImage(img,sx,0,1,srcH,splitX,0,gap,drawH);}
-      destCtx.drawImage(tmp,dx,dy);
-    }
+    tc.drawImage(img,0,0,lSrcW,srcH,0,0,splitX,drawH);
+    tc.drawImage(img,lSrcW,0,rSrcW,srcH,splitX+gap,0,rDstW,drawH);
+    if(gap>0){const sx=Math.min(srcW-1,lSrcW);tc.drawImage(img,sx,0,1,srcH,splitX,0,gap,drawH);}
+    destCtx.drawImage(tmp,movingSide===0?dx-gap:dx,dy);
   }else{
-    const splitY=Math.round(drawH*spx);
-    const tSrcH=Math.round(srcH*spx),bSrcH=srcH-tSrcH,bDstH=drawH-splitY;
-    const tmp=document.createElement('canvas');
-    tmp.width=drawW;tmp.height=drawH+gap;
+    const splitY=Math.round(drawH*spx),tSrcH=Math.round(srcH*spx),bSrcH=srcH-tSrcH,bDstH=drawH-splitY;
+    const tmp=document.createElement('canvas');tmp.width=drawW;tmp.height=drawH+gap;
     const tc=tmp.getContext('2d');
-    if(movingSide===0){
-      tc.drawImage(img,0,0,srcW,tSrcH,0,0,drawW,splitY);
-      tc.drawImage(img,0,tSrcH,srcW,bSrcH,0,splitY+gap,drawW,bDstH);
-      if(gap>0){const sy=Math.min(srcH-1,tSrcH);tc.drawImage(img,0,sy,srcW,1,0,splitY,drawW,gap);}
-      destCtx.drawImage(tmp,dx,dy-gap);
-    }else{
-      tc.drawImage(img,0,0,srcW,tSrcH,0,0,drawW,splitY);
-      tc.drawImage(img,0,tSrcH,srcW,bSrcH,0,splitY+gap,drawW,bDstH);
-      if(gap>0){const sy=Math.min(srcH-1,tSrcH);tc.drawImage(img,0,sy,srcW,1,0,splitY,drawW,gap);}
-      destCtx.drawImage(tmp,dx,dy);
-    }
+    tc.drawImage(img,0,0,srcW,tSrcH,0,0,drawW,splitY);
+    tc.drawImage(img,0,tSrcH,srcW,bSrcH,0,splitY+gap,drawW,bDstH);
+    if(gap>0){const sy=Math.min(srcH-1,tSrcH);tc.drawImage(img,0,sy,srcW,1,0,splitY,drawW,gap);}
+    destCtx.drawImage(tmp,dx,movingSide===0?dy-gap:dy);
   }
 }
 
 // ══════════════════════════════════════════════════════
-// Layer management (clips baked at t=1, no zoom applied here)
+// accum helpers
 // ══════════════════════════════════════════════════════
-function initLayer(W,H){
-  layerCvs=document.createElement('canvas');layerCvs.width=W;layerCvs.height=H;
-  layerCtx=layerCvs.getContext('2d');committed=0;
-  accumCvs=null;accumCtx=null;zoomLastT=0;
+function makeAccum(W,H){
+  const c=document.createElement('canvas');c.width=W;c.height=H;
+  const ctx2=c.getContext('2d');fillBg(ctx2,W,H);
+  return{cvs:c,ctx:ctx2};
 }
-function buildLayerUpTo(idx){
-  for(let i=committed;i<idx;i++) renderClip(layerCtx,sequence[i],1);
-  committed=Math.max(committed,idx);
+
+// accumCvs に clip を焼き込む（t=1 の最終状態）
+function bakeClip(ac,clip){renderClip(ac.ctx,clip,1);}
+
+// accumCvs をズームして destCtx へ描画
+// s = 1フレーム分のスケール係数
+function drawZoomed(destCtx,ac,W,H,s){
+  if(s<=1.0){destCtx.drawImage(ac.cvs,0,0);return;}
+  const cx=W/2,cy=H/2;
+  destCtx.save();
+  destCtx.translate(cx,cy);
+  destCtx.scale(s,s);
+  destCtx.translate(-cx,-cy);
+  destCtx.drawImage(ac.cvs,0,0);
+  destCtx.restore();
+}
+
+// accumCvs をズーム込みで自己更新（画面外ピクセルを捨てる）
+// destCtx に描いた後、その内容を ac.cvs に折り返す
+function updateAccum(ac,W,H,s){
+  const tmp=document.createElement('canvas');tmp.width=W;tmp.height=H;
+  const tc=tmp.getContext('2d');
+  tc.drawImage(ac.cvs,0,0); // まずコピー
+  ac.ctx.clearRect(0,0,W,H);
+  drawZoomed(ac.ctx,{cvs:tmp},W,H,s); // ズームして自分自身を上書き（画面外は自動カット）
 }
 
 // ══════════════════════════════════════════════════════
-// accum helpers: 前フレームをズームしてcanvasに焼き込む
+// Manual mode: renderFrame
+// ── フレームごとの手順 ──
+// 1. dt に応じて accum を中心ズーム更新（updateAccum）→ 画面外が削除される
+// 2. 新しく終了したclipを accum に焼き込む
+// 3. ctx = accum をそのまま描画 + アクティブclip を等倍で重ねる
 // ══════════════════════════════════════════════════════
-function applyAccumZoom(destCtx, src, W, H, dt, rate){
-  // src(前フレーム画像) を中心向きにズームしてdestCtxへ描画
-  if(rate>0 && dt>0){
-    const s=Math.pow(1+rate,dt);
-    const cx=W/2,cy=H/2;
-    destCtx.save();
-    destCtx.translate(cx,cy);
-    destCtx.scale(s,s);
-    destCtx.translate(-cx,-cy);
-    destCtx.drawImage(src,0,0);
-    destCtx.restore();
-  }else{
-    destCtx.drawImage(src,0,0);
-  }
+let manualAc=null;  // {cvs,ctx}
+let manualCommitted=0;
+
+function initManual(W,H){
+  manualAc=makeAccum(W,H);manualCommitted=0;prevT=-1;
 }
 
-// ══════════════════════════════════════════════════════
-// Frame render (manual mode)
-// 手順: 背景 → 前フレームをズーム → 焼き済みlayer → アクティブclip → テキスト
-//       → 今のcanvasをaccumCvsにコピー（次フレームの入力）
-// ══════════════════════════════════════════════════════
 function renderFrame(t){
   if(!sequence.length)return;
   const W=canvas.width,H=canvas.height;
   const rate=getZoomRate();
-  const dt=Math.max(0,t-zoomLastT);
-  zoomLastT=t;
 
-  // accumCvs 初期化（最初のフレームまたはリセット後）
-  if(!accumCvs||accumCvs.width!==W||accumCvs.height!==H){
-    accumCvs=document.createElement('canvas');accumCvs.width=W;accumCvs.height=H;
-    accumCtx=accumCvs.getContext('2d');
-    drawBackground(accumCtx,W,H);
+  if(!manualAc||manualAc.cvs.width!==W||manualAc.cvs.height!==H) initManual(W,H);
+
+  // 1. zoom: accum を更新（dt分だけズーム、画面外削除）
+  const dt=prevT<0?0:Math.max(0,t-prevT);
+  prevT=t;
+  if(rate>0&&dt>0){
+    const s=Math.pow(1+rate,dt);
+    updateAccum(manualAc,W,H,s);
   }
 
+  // 2. 完了したclipをaccumに焼き込む（順番通りに）
   let firstActive=0;
-  while(firstActive<sequence.length&&sequence[firstActive].startTime+sequence[firstActive].duration<t) firstActive++;
-  buildLayerUpTo(firstActive);
+  while(firstActive<sequence.length&&sequence[firstActive].startTime+sequence[firstActive].duration<t){
+    if(firstActive>=manualCommitted){
+      bakeClip(manualAc,sequence[firstActive]);
+      manualCommitted=firstActive+1;
+    }
+    firstActive++;
+  }
+  if(manualCommitted<firstActive)manualCommitted=firstActive;
 
-  // 1. 背景（固定）
+  // 3. 描画: accum（ズーム済み過去） + アクティブclip（等倍）
   ctx.clearRect(0,0,W,H);
-  drawBackground(ctx,W,H);
-
-  // 2. 前フレームをズームして重ねる（画面全体が中心に向かって拡大）
-  applyAccumZoom(ctx,accumCvs,W,H,dt,rate);
-
-  // 3. 焼き済みlayer（ズーム済みaccumに積み重なる形で等倍描画）
-  ctx.drawImage(layerCvs,0,0);
-
-  // 4. アクティブなclip（等倍）
+  ctx.drawImage(manualAc.cvs,0,0);
   for(let i=firstActive;i<sequence.length;i++){
     const clip=sequence[i];
     if(clip.startTime>t)break;
     renderClip(ctx,clip,Math.min(1,(t-clip.startTime)/clip.duration));
   }
-
-  // 5. テキスト（ズームに乗らない）
   drawCenterText(ctx,W,H,t);
   updateHudBeat(t);
-
-  // 6. 今のフレームをaccumCvsへ保存（次フレームへ）
-  accumCtx.clearRect(0,0,W,H);
-  accumCtx.drawImage(canvas,0,0);
 }
 
 // ══════════════════════════════════════════════════════
@@ -633,9 +591,8 @@ function generateSeq(){
   seedRng(seed);
   const [W,H]=getOutputSize();
   sequence=[];
-  for(let b=0;b<totalBts;b++) sequence.push(makeClip(b*beatDur,images,W,H));
+  for(let b=0;b<totalBts;b++)sequence.push(makeClip(b*beatDur,images,W,H));
   canvas.width=W;canvas.height=H;canvas.style.display='block';
-  initLayer(W,H);
   document.getElementById('emptyState').style.display='none';
   document.getElementById('hud').style.display='';
   document.getElementById('playBtn').disabled=false;
@@ -647,28 +604,23 @@ function generateSeq(){
 // Playback
 // ══════════════════════════════════════════════════════
 function togglePlay(){
-  if(!sequence.length)return;
-  isPlaying=!isPlaying;
+  if(!sequence.length)return;isPlaying=!isPlaying;
   const btn=document.getElementById('playBtn');
-  if(isPlaying){
-    btn.textContent='⏸ 停止';playOrigin=-1;
-    rafId=requestAnimationFrame(playLoop);
-  }else{cancelAnimationFrame(rafId);btn.textContent='▶ 再生';}
+  if(isPlaying){btn.textContent='⏸ 停止';playOrigin=-1;rafId=requestAnimationFrame(playLoop);}
+  else{cancelAnimationFrame(rafId);btn.textContent='▶ 再生';}
 }
 function playLoop(ts){
-  if(playOrigin===-1) playOrigin=ts/1000-pauseTime;
-  const t=ts/1000-playOrigin;
-  pauseTime=t;
+  if(playOrigin===-1)playOrigin=ts/1000-pauseTime;
+  const t=ts/1000-playOrigin;pauseTime=t;
   if(t>=totalDur){renderFrame(totalDur);isPlaying=false;pauseTime=totalDur;document.getElementById('playBtn').textContent='▶ 再生';return;}
   renderFrame(t);
   if(isPlaying)rafId=requestAnimationFrame(playLoop);
 }
 function resetPlay(){
-  cancelAnimationFrame(rafId);
-  isPlaying=false;pauseTime=0;playOrigin=-1;
+  cancelAnimationFrame(rafId);isPlaying=false;pauseTime=0;playOrigin=-1;
   document.getElementById('playBtn').textContent='▶ 再生';
-  if(layerCtx){layerCtx.clearRect(0,0,layerCvs.width,layerCvs.height);committed=0;}
-  accumCvs=null;accumCtx=null;zoomLastT=0;
+  const [W,H]=getOutputSize();
+  initManual(W,H);
   if(sequence.length)renderFrame(0);
 }
 
@@ -678,24 +630,23 @@ function resetPlay(){
 function setMode(m){
   mode=m;
   document.getElementById('modeManual').className='mode-btn'+(m==='manual'?' active':'');
-  document.getElementById('modeLive').className  ='mode-btn'+(m==='live'?' live-active':'');
+  document.getElementById('modeLive').className='mode-btn'+(m==='live'?' live-active':'');
   document.getElementById('manualControls').style.display=m==='manual'?'':'none';
-  document.getElementById('liveControls').style.display  =m==='live'?'':'none';
+  document.getElementById('liveControls').style.display=m==='live'?'':'none';
   if(m==='manual'&&liveActive)stopLive();
 }
 function toggleLive(){liveActive?stopLive():startLive();}
 
+let liveAc=null;
 function startLive(){
   if(!images.length)return;
-  liveActive=true;livePrevBeat=-1;liveOrigin=-1;liveClips=[];
+  liveActive=true;livePrevBeat=-1;liveOrigin=-1;liveClips=[];livePrevT=-1;
   const [W,H]=getOutputSize();
   canvas.width=W;canvas.height=H;canvas.style.display='block';
   document.getElementById('emptyState').style.display='none';
   document.getElementById('hud').style.display='';
   document.getElementById('hudLive').style.display='';
-  liveLayerCvs=document.createElement('canvas');liveLayerCvs.width=W;liveLayerCvs.height=H;
-  liveLayerCtx=liveLayerCvs.getContext('2d');
-  liveAccumCvs=null;liveAccumCtx=null;liveZoomLastT=0;
+  liveAc=makeAccum(W,H);
   document.getElementById('liveStartBtn').textContent='■ LIVE STOP';
   document.getElementById('liveStartBtn').className='btn btn-secondary';
   liveRafId=requestAnimationFrame(liveLoop);
@@ -716,7 +667,7 @@ function liveLoop(ts){
   const [W,H]=getOutputSize();
   const rate=getZoomRate();
 
-  // Beat detection & clip spawn
+  // Beat → spawn
   const currentBeat=Math.floor(elapsed/beatDur);
   if(currentBeat!==livePrevBeat&&currentBeat%refresh===0){
     livePrevBeat=currentBeat;
@@ -724,36 +675,30 @@ function liveLoop(ts){
     if(pool.length)liveClips.push(makeClip(currentBeat*beatDur,pool,W,H));
   }
 
-  // Bake finished clips into liveLayerCvs
+  // Zoom: accum を更新
+  const ldt=livePrevT<0?0:Math.max(0,elapsed-livePrevT);
+  livePrevT=elapsed;
+  if(!liveAc||liveAc.cvs.width!==W||liveAc.cvs.height!==H)liveAc=makeAccum(W,H);
+  if(rate>0&&ldt>0){
+    const s=Math.pow(1+rate,ldt);
+    updateAccum(liveAc,W,H,s);
+  }
+
+  // 終了したclipをaccumに焼き込む
   liveClips=liveClips.filter(c=>{
-    if(elapsed>c.startTime+c.duration){renderClip(liveLayerCtx,c,1);return false;}
+    if(elapsed>c.startTime+c.duration){bakeClip(liveAc,c);return false;}
     return true;
   });
 
-  // accumCvs 初期化
-  if(!liveAccumCvs||liveAccumCvs.width!==W||liveAccumCvs.height!==H){
-    liveAccumCvs=document.createElement('canvas');liveAccumCvs.width=W;liveAccumCvs.height=H;
-    liveAccumCtx=liveAccumCvs.getContext('2d');
-    drawBackground(liveAccumCtx,W,H);
-  }
-  const ldt=Math.max(0,elapsed-liveZoomLastT);
-  liveZoomLastT=elapsed;
-
-  // 描画: 背景 → 前フレームをズーム → baked layer → アクティブclip → テキスト
+  // 描画
   ctx.clearRect(0,0,W,H);
-  drawBackground(ctx,W,H);
-  applyAccumZoom(ctx,liveAccumCvs,W,H,ldt,rate);
-  ctx.drawImage(liveLayerCvs,0,0);
+  ctx.drawImage(liveAc.cvs,0,0);
   liveClips.forEach(c=>{
     const lt=Math.min(1,(elapsed-c.startTime)/c.duration);
     if(lt>=0)renderClip(ctx,c,lt);
   });
   drawCenterText(ctx,W,H,elapsed);
   updateHudBeat(elapsed);
-
-  // 今のフレームをliveAccumCvsへ保存
-  liveAccumCtx.clearRect(0,0,W,H);
-  liveAccumCtx.drawImage(canvas,0,0);
 
   if(liveActive)liveRafId=requestAnimationFrame(liveLoop);
 }
@@ -767,74 +712,54 @@ async function startExport(){
   const [W,H]=getOutputSize();
   const totalFrames=Math.ceil(totalDur*fps);
   const rate=getZoomRate();
-
   const ov=document.getElementById('progOverlay');
-  const bar=document.getElementById('progFill');
-  const lbl=document.getElementById('progLabel');
-  const frm=document.getElementById('progFrame');
-  ov.classList.add('show');
+  const bar=document.getElementById('progFill'),lbl=document.getElementById('progLabel'),frm=document.getElementById('progFrame');
+  ov.classList.add('show');lbl.textContent='フレームをレンダリング中...';
 
   const off=document.createElement('canvas');off.width=W;off.height=H;
   const oc=off.getContext('2d');
-  const exLayer=document.createElement('canvas');exLayer.width=W;exLayer.height=H;
-  const elc=exLayer.getContext('2d');
-  let exCommitted=0;
+  const exAc=makeAccum(W,H);
+  let exCommitted=0,exPrevT=-1;
 
-  // export用accumCvs（黒で初期化）
-  const exAccum=document.createElement('canvas');exAccum.width=W;exAccum.height=H;
-  const eac=exAccum.getContext('2d');
-  drawBackground(eac,W,H);
-  let exZoomLastT=0;
-
-  lbl.textContent='フレームをレンダリング中...';
   const blobs=[];
   for(let f=0;f<totalFrames;f++){
     const t=f/fps;
-    const exDt=Math.max(0,t-exZoomLastT);
-    exZoomLastT=t;
+    const dt=exPrevT<0?0:Math.max(0,t-exPrevT);exPrevT=t;
+    if(rate>0&&dt>0){const s=Math.pow(1+rate,dt);updateAccum(exAc,W,H,s);}
 
-    // bake ended clips
-    while(exCommitted<sequence.length&&sequence[exCommitted].startTime+sequence[exCommitted].duration<t){
-      renderClip(elc,sequence[exCommitted],1);exCommitted++;
+    // bake
+    let firstActive=0;
+    while(firstActive<sequence.length&&sequence[firstActive].startTime+sequence[firstActive].duration<t){
+      if(firstActive>=exCommitted){bakeClip(exAc,sequence[firstActive]);exCommitted=firstActive+1;}
+      firstActive++;
     }
+    if(exCommitted<firstActive)exCommitted=firstActive;
 
     oc.clearRect(0,0,W,H);
-    drawBackground(oc,W,H);
-    applyAccumZoom(oc,exAccum,W,H,exDt,rate);
-    oc.drawImage(exLayer,0,0);
-    for(let i=exCommitted;i<sequence.length;i++){
-      const clip=sequence[i];
-      if(clip.startTime>t)break;
+    oc.drawImage(exAc.cvs,0,0);
+    for(let i=firstActive;i<sequence.length;i++){
+      const clip=sequence[i];if(clip.startTime>t)break;
       renderClip(oc,clip,Math.min(1,(t-clip.startTime)/clip.duration));
     }
     drawCenterText(oc,W,H,t);
 
-    // 今のフレームをexAccumに保存
-    eac.clearRect(0,0,W,H);eac.drawImage(off,0,0);
-
     const blob=await new Promise(res=>off.toBlob(res,'image/png'));
     blobs.push(blob);
-    bar.style.width=((f+1)/totalFrames*60)+'%';
-    frm.textContent=`${f+1} / ${totalFrames} frames`;
+    bar.style.width=((f+1)/totalFrames*60)+'%';frm.textContent=`${f+1} / ${totalFrames} frames`;
     if(f%10===9)await new Promise(r=>setTimeout(r,0));
   }
 
   lbl.textContent='エンコード中...';
-  const sc=document.createElement('canvas');sc.width=W;sc.height=H;
-  const sctx=sc.getContext('2d');
+  const sc=document.createElement('canvas');sc.width=W;sc.height=H;const sctx=sc.getContext('2d');
   const chunks=[];
   const mime=MediaRecorder.isTypeSupported('video/webm;codecs=vp9')?'video/webm;codecs=vp9':'video/webm';
-  const stream=sc.captureStream(0);
-  const track=stream.getVideoTracks()[0];
+  const stream=sc.captureStream(0);const track=stream.getVideoTracks()[0];
   const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:16_000_000});
   rec.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
-  const recStopped=new Promise(res=>rec.onstop=res);
-  rec.start();
-  const frameDelay=1000/fps;
-  const encodeStart=performance.now();
+  const recStopped=new Promise(res=>rec.onstop=res);rec.start();
+  const frameDelay=1000/fps,encodeStart=performance.now();
   for(let i=0;i<blobs.length;i++){
-    const bmp=await createImageBitmap(blobs[i]);
-    sctx.clearRect(0,0,W,H);sctx.drawImage(bmp,0,0);bmp.close();
+    const bmp=await createImageBitmap(blobs[i]);sctx.clearRect(0,0,W,H);sctx.drawImage(bmp,0,0);bmp.close();
     if(typeof track.requestFrame==='function')track.requestFrame();
     bar.style.width=(60+(i+1)/blobs.length*38)+'%';
     const wait=(i+1)*frameDelay-(performance.now()-encodeStart);
