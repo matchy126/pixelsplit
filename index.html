@@ -313,20 +313,24 @@ function rngPick(arr){return arr[Math.floor(rng()*arr.length)];}
 let images=[], bgImage=null, sequence=[], totalDur=0, mode='manual';
 let isPlaying=false, playOrigin=-1, pauseTime=0, rafId=null;
 
-// ── accumCvs だけがすべての描画状態を持つ ──
-// ロジック:
-//   毎フレーム accumCvs を「中心に向かって s 倍」にズームして ctx へ描画
-//   その上にアクティブclipを等倍で重ねる
-//   clipが終了したら t=1 の状態を accumCvs に直接焼き込む
-//   → layerCvs は不要。accumCvs がすべて。
+// ── ズーム方式 ──
+// accumCvs: すべての完了clipをズームなし座標で蓄積（drawImageは1回だけ）
+// zoomScale: 現在の累積倍率（描画時にctx.scaleで一度だけ適用）
+// → accumCvsへの重ね描きは一切補間なし。ブラーゼロ。
+// → clipが完了したらzoomScaleの逆数でaccumに焼き込む（元の座標系で書く）
+// → 描画時: ctx.scale(zoomScale) で accum + アクティブclip をまとめて拡大
+// → 画面外削除: zoomScaleが一定以上になったらaccumをリセンター（bakedown）
+
 let accumCvs=null, accumCtx=null;
-let prevT=-1; // 前フレームの t（dt 計算用）
+let zoomScale=1.0, prevT=-1;
+let manualCommitted=0;
 
 // Live
 let liveActive=false, liveOrigin=-1;
 let liveAccumCvs=null, liveAccumCtx=null;
-let livePrevT=-1;
+let liveZoomScale=1.0, livePrevT=-1;
 let liveClips=[], livePrevBeat=-1, liveRafId=null;
+let liveCommitted=[];  // baked clip indices (live uses array not index)
 
 const canvas=document.getElementById('previewCanvas');
 const ctx=canvas.getContext('2d');
@@ -356,8 +360,9 @@ setupBgDrop('bgFileInput','bgDropZone');
 
 ['centerTextInput','centerFont','centerColor','centerAlign'].forEach(id=>{
   const el=document.getElementById(id);
-  if(el) el.addEventListener('input',()=>{if(sequence.length||liveActive)renderFrame(pauseTime||0);});
+  if(el)el.addEventListener('input',()=>{if(sequence.length||liveActive)redrawCurrent();});
 });
+function redrawCurrent(){if(sequence.length)renderFrame(pauseTime||0);}
 
 function getOutputSize(){return document.getElementById('resSel').value.split('x').map(Number);}
 function getBpm(){return parseFloat(document.getElementById('bpmInput').value)||128;}
@@ -423,8 +428,7 @@ dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');}
 dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
 dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');loadFiles(Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/')));});
 async function loadFiles(files){
-  files=files.filter(f=>f.type.startsWith('image/'));
-  if(!files.length)return;
+  files=files.filter(f=>f.type.startsWith('image/'));if(!files.length)return;
   for(const f of files){
     await new Promise(res=>{const img=new Image(),url=URL.createObjectURL(f);img.onload=()=>{images.push({name:f.name,img,url});res();};img.onerror=res;img.src=url;});
   }
@@ -491,89 +495,116 @@ function renderClip(destCtx,clip,t){
 }
 
 // ══════════════════════════════════════════════════════
-// accum helpers
+// Zoom + accum helpers
+//
+// 考え方:
+//   accumCvs = 完了したclipをすべて「ズームなし座標」で保持するキャンバス
+//   zoomScale = 累積倍率（増え続ける）
+//
+//   描画時:
+//     ctx.scale(zoomScale) で accumCvs + アクティブclip をまとめて拡大描画
+//     → drawImage は1回のみ → ブラーなし
+//
+//   clip完了時の焼き込み:
+//     accum は「ズームなし座標系」なので、clipのdx,dyをそのまま使えばよい
+//     ただし、アクティブclipは描画時に zoomScale で拡大されていたので
+//     accum に焼く座標は逆変換不要（accumの座標系のまま書く）
+//
+//   画面外削除（bakedown）:
+//     zoomScale が大きくなると画面内に見えるのは accum の中心付近だけになる。
+//     定期的に accumCvs をリセンター: 現在の zoomScale 変換を accum 自体に焼き込み、
+//     zoomScale を 1.0 に戻す。→ accum のサイズは変わらないが画面外ピクセルは消える。
 // ══════════════════════════════════════════════════════
-function makeAccum(W,H){
+function makeAccumCanvas(W,H){
   const c=document.createElement('canvas');c.width=W;c.height=H;
-  const ctx2=c.getContext('2d');fillBg(ctx2,W,H);
-  return{cvs:c,ctx:ctx2};
+  return{cvs:c,ctx:c.getContext('2d')};
 }
 
-// accumCvs に clip を焼き込む（t=1 の最終状態）
-function bakeClip(ac,clip){renderClip(ac.ctx,clip,1);}
-
-// accumCvs をズームして destCtx へ描画
-// s = 1フレーム分のスケール係数
-function drawZoomed(destCtx,ac,W,H,s){
-  if(s<=1.0){destCtx.drawImage(ac.cvs,0,0);return;}
-  const cx=W/2,cy=H/2;
-  destCtx.save();
-  destCtx.translate(cx,cy);
-  destCtx.scale(s,s);
-  destCtx.translate(-cx,-cy);
-  destCtx.drawImage(ac.cvs,0,0);
-  destCtx.restore();
-}
-
-// accumCvs をズーム込みで自己更新（画面外ピクセルを捨てる）
-// destCtx に描いた後、その内容を ac.cvs に折り返す
-function updateAccum(ac,W,H,s){
+// accumをzoomScale込みで自分自身に焼き込む（画面外ピクセル削除）
+// → その後 zoomScale=1.0 にリセット
+function bakedown(ac,W,H,scale){
+  if(scale<=1.001)return;
   const tmp=document.createElement('canvas');tmp.width=W;tmp.height=H;
   const tc=tmp.getContext('2d');
-  tc.drawImage(ac.cvs,0,0); // まずコピー
+  const cx=W/2,cy=H/2;
+  tc.save();tc.translate(cx,cy);tc.scale(scale,scale);tc.translate(-cx,-cy);
+  tc.drawImage(ac.cvs,0,0);
+  tc.restore();
   ac.ctx.clearRect(0,0,W,H);
-  drawZoomed(ac.ctx,{cvs:tmp},W,H,s); // ズームして自分自身を上書き（画面外は自動カット）
+  ac.ctx.drawImage(tmp,0,0);
+}
+
+// clipを accumCvs に焼き込む（ズームなし座標系、t=1 の最終状態）
+function bakeClipToAccum(ac,clip){
+  renderClip(ac.ctx,clip,1);
+}
+
+// ──────────────────────────────────────────────
+// 描画コア: accumをズームして ctx へ、その上にアクティブclipをズームして重ねる
+// activeClips: [{clip, localT}]
+// ──────────────────────────────────────────────
+function compositeFrame(destCtx,ac,scale,activeClips,W,H,t){
+  destCtx.clearRect(0,0,W,H);
+  const cx=W/2,cy=H/2;
+  destCtx.save();
+  destCtx.translate(cx,cy);destCtx.scale(scale,scale);destCtx.translate(-cx,-cy);
+  // 背景は accum の中にすでに含まれているが、accum 初期化後は空なので別途描く
+  destCtx.drawImage(ac.cvs,0,0);
+  // アクティブclipも同じズーム空間内に描く（過去clipと一緒に拡大される）
+  activeClips.forEach(({clip,lt})=>renderClip(destCtx,clip,lt));
+  destCtx.restore();
+  drawCenterText(destCtx,W,H,t);
 }
 
 // ══════════════════════════════════════════════════════
-// Manual mode: renderFrame
-// ── フレームごとの手順 ──
-// 1. dt に応じて accum を中心ズーム更新（updateAccum）→ 画面外が削除される
-// 2. 新しく終了したclipを accum に焼き込む
-// 3. ctx = accum をそのまま描画 + アクティブclip を等倍で重ねる
+// Manual mode
 // ══════════════════════════════════════════════════════
-let manualAc=null;  // {cvs,ctx}
-let manualCommitted=0;
+let manualAc=null;
+let manualCommitted2=0;
+const BAKEDOWN_THRESHOLD=3.0; // zoomScaleがこれを超えたらbakedown
 
 function initManual(W,H){
-  manualAc=makeAccum(W,H);manualCommitted=0;prevT=-1;
+  manualAc=makeAccumCanvas(W,H);
+  // 背景を accum に描き込む（初期状態）
+  fillBg(manualAc.ctx,W,H);
+  manualCommitted2=0;zoomScale=1.0;prevT=-1;
 }
 
 function renderFrame(t){
   if(!sequence.length)return;
   const W=canvas.width,H=canvas.height;
   const rate=getZoomRate();
+  if(!manualAc||manualAc.cvs.width!==W)initManual(W,H);
 
-  if(!manualAc||manualAc.cvs.width!==W||manualAc.cvs.height!==H) initManual(W,H);
+  // dt → zoomScale 更新
+  const dt=prevT<0?0:Math.max(0,t-prevT);prevT=t;
+  if(rate>0&&dt>0) zoomScale*=Math.pow(1+rate,dt);
 
-  // 1. zoom: accum を更新（dt分だけズーム、画面外削除）
-  const dt=prevT<0?0:Math.max(0,t-prevT);
-  prevT=t;
-  if(rate>0&&dt>0){
-    const s=Math.pow(1+rate,dt);
-    updateAccum(manualAc,W,H,s);
-  }
-
-  // 2. 完了したclipをaccumに焼き込む（順番通りに）
+  // 完了したclipを accum に焼き込む
   let firstActive=0;
   while(firstActive<sequence.length&&sequence[firstActive].startTime+sequence[firstActive].duration<t){
-    if(firstActive>=manualCommitted){
-      bakeClip(manualAc,sequence[firstActive]);
-      manualCommitted=firstActive+1;
+    if(firstActive>=manualCommitted2){
+      bakeClipToAccum(manualAc,sequence[firstActive]);
+      manualCommitted2=firstActive+1;
     }
     firstActive++;
   }
-  if(manualCommitted<firstActive)manualCommitted=firstActive;
+  if(manualCommitted2<firstActive)manualCommitted2=firstActive;
 
-  // 3. 描画: accum（ズーム済み過去） + アクティブclip（等倍）
-  ctx.clearRect(0,0,W,H);
-  ctx.drawImage(manualAc.cvs,0,0);
-  for(let i=firstActive;i<sequence.length;i++){
-    const clip=sequence[i];
-    if(clip.startTime>t)break;
-    renderClip(ctx,clip,Math.min(1,(t-clip.startTime)/clip.duration));
+  // bakedown: 画面外を削除してzoomScaleをリセット
+  if(zoomScale>=BAKEDOWN_THRESHOLD){
+    bakedown(manualAc,W,H,zoomScale);
+    zoomScale=1.0;
   }
-  drawCenterText(ctx,W,H,t);
+
+  // アクティブclipリスト
+  const activeClips=[];
+  for(let i=firstActive;i<sequence.length;i++){
+    const clip=sequence[i];if(clip.startTime>t)break;
+    activeClips.push({clip,lt:Math.min(1,(t-clip.startTime)/clip.duration)});
+  }
+
+  compositeFrame(ctx,manualAc,zoomScale,activeClips,W,H,t);
   updateHudBeat(t);
 }
 
@@ -640,13 +671,13 @@ function toggleLive(){liveActive?stopLive():startLive();}
 let liveAc=null;
 function startLive(){
   if(!images.length)return;
-  liveActive=true;livePrevBeat=-1;liveOrigin=-1;liveClips=[];livePrevT=-1;
+  liveActive=true;livePrevBeat=-1;liveOrigin=-1;liveClips=[];livePrevT=-1;liveZoomScale=1.0;
   const [W,H]=getOutputSize();
   canvas.width=W;canvas.height=H;canvas.style.display='block';
   document.getElementById('emptyState').style.display='none';
   document.getElementById('hud').style.display='';
   document.getElementById('hudLive').style.display='';
-  liveAc=makeAccum(W,H);
+  liveAc=makeAccumCanvas(W,H);fillBg(liveAc.ctx,W,H);
   document.getElementById('liveStartBtn').textContent='■ LIVE STOP';
   document.getElementById('liveStartBtn').className='btn btn-secondary';
   liveRafId=requestAnimationFrame(liveLoop);
@@ -667,7 +698,6 @@ function liveLoop(ts){
   const [W,H]=getOutputSize();
   const rate=getZoomRate();
 
-  // Beat → spawn
   const currentBeat=Math.floor(elapsed/beatDur);
   if(currentBeat!==livePrevBeat&&currentBeat%refresh===0){
     livePrevBeat=currentBeat;
@@ -675,29 +705,25 @@ function liveLoop(ts){
     if(pool.length)liveClips.push(makeClip(currentBeat*beatDur,pool,W,H));
   }
 
-  // Zoom: accum を更新
+  // dt → liveZoomScale
   const ldt=livePrevT<0?0:Math.max(0,elapsed-livePrevT);
   livePrevT=elapsed;
-  if(!liveAc||liveAc.cvs.width!==W||liveAc.cvs.height!==H)liveAc=makeAccum(W,H);
-  if(rate>0&&ldt>0){
-    const s=Math.pow(1+rate,ldt);
-    updateAccum(liveAc,W,H,s);
-  }
+  if(rate>0&&ldt>0) liveZoomScale*=Math.pow(1+rate,ldt);
 
-  // 終了したclipをaccumに焼き込む
+  // 完了clip → accum に焼き込む
   liveClips=liveClips.filter(c=>{
-    if(elapsed>c.startTime+c.duration){bakeClip(liveAc,c);return false;}
+    if(elapsed>c.startTime+c.duration){bakeClipToAccum(liveAc,c);return false;}
     return true;
   });
 
-  // 描画
-  ctx.clearRect(0,0,W,H);
-  ctx.drawImage(liveAc.cvs,0,0);
-  liveClips.forEach(c=>{
-    const lt=Math.min(1,(elapsed-c.startTime)/c.duration);
-    if(lt>=0)renderClip(ctx,c,lt);
-  });
-  drawCenterText(ctx,W,H,elapsed);
+  // bakedown
+  if(liveZoomScale>=BAKEDOWN_THRESHOLD){
+    bakedown(liveAc,W,H,liveZoomScale);
+    liveZoomScale=1.0;
+  }
+
+  const activeClips=liveClips.map(c=>({clip:c,lt:Math.min(1,(elapsed-c.startTime)/c.duration)})).filter(({lt})=>lt>=0);
+  compositeFrame(ctx,liveAc,liveZoomScale,activeClips,W,H,elapsed);
   updateHudBeat(elapsed);
 
   if(liveActive)liveRafId=requestAnimationFrame(liveLoop);
@@ -718,30 +744,29 @@ async function startExport(){
 
   const off=document.createElement('canvas');off.width=W;off.height=H;
   const oc=off.getContext('2d');
-  const exAc=makeAccum(W,H);
-  let exCommitted=0,exPrevT=-1;
+  const exAc=makeAccumCanvas(W,H);fillBg(exAc.ctx,W,H);
+  let exCommitted=0,exPrevT=-1,exZoomScale=1.0;
 
   const blobs=[];
   for(let f=0;f<totalFrames;f++){
     const t=f/fps;
     const dt=exPrevT<0?0:Math.max(0,t-exPrevT);exPrevT=t;
-    if(rate>0&&dt>0){const s=Math.pow(1+rate,dt);updateAccum(exAc,W,H,s);}
+    if(rate>0&&dt>0)exZoomScale*=Math.pow(1+rate,dt);
 
-    // bake
     let firstActive=0;
     while(firstActive<sequence.length&&sequence[firstActive].startTime+sequence[firstActive].duration<t){
-      if(firstActive>=exCommitted){bakeClip(exAc,sequence[firstActive]);exCommitted=firstActive+1;}
+      if(firstActive>=exCommitted){bakeClipToAccum(exAc,sequence[firstActive]);exCommitted=firstActive+1;}
       firstActive++;
     }
     if(exCommitted<firstActive)exCommitted=firstActive;
+    if(exZoomScale>=BAKEDOWN_THRESHOLD){bakedown(exAc,W,H,exZoomScale);exZoomScale=1.0;}
 
-    oc.clearRect(0,0,W,H);
-    oc.drawImage(exAc.cvs,0,0);
+    const activeClips=[];
     for(let i=firstActive;i<sequence.length;i++){
       const clip=sequence[i];if(clip.startTime>t)break;
-      renderClip(oc,clip,Math.min(1,(t-clip.startTime)/clip.duration));
+      activeClips.push({clip,lt:Math.min(1,(t-clip.startTime)/clip.duration)});
     }
-    drawCenterText(oc,W,H,t);
+    compositeFrame(oc,exAc,exZoomScale,activeClips,W,H,t);
 
     const blob=await new Promise(res=>off.toBlob(res,'image/png'));
     blobs.push(blob);
